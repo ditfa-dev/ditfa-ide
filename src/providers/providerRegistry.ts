@@ -1,6 +1,7 @@
 import type { AppServerClient } from "../client/appServerClient";
 import type { Model } from "../protocol";
 import type { ModelListResponse } from "../protocol/generated/v2/ModelListResponse";
+import type { ModelChoice } from "../session/types";
 import type { Logger } from "../util/logger";
 
 export interface ProviderInfo {
@@ -11,34 +12,136 @@ export interface ProviderInfo {
   envKey: string | null;
   /** True when ditfa ships an adapter for this provider out of the box. */
   builtIn: boolean;
+  kind: "account" | "apiKey" | "local";
+  /** Where to get a key, shown when asking for one. */
+  keyUrl?: string;
 }
 
 /**
  * Providers ditfa supports without any `config.toml` entry. Users can override
  * or extend these with `[model_providers.*]`.
  */
-const BUILT_IN_PROVIDERS: ProviderInfo[] = [
-  { id: "openai", name: "OpenAI", baseUrl: null, envKey: "OPENAI_API_KEY", builtIn: true },
-  { id: "anthropic", name: "Anthropic", baseUrl: null, envKey: "ANTHROPIC_API_KEY", builtIn: true },
-  { id: "gemini", name: "Google Gemini", baseUrl: null, envKey: "GEMINI_API_KEY", builtIn: true },
+export const BUILT_IN_PROVIDERS: ProviderInfo[] = [
+  {
+    id: "ditfa",
+    name: "Ditfa",
+    baseUrl: "https://api.ditfa.com/api/v1",
+    envKey: "DITFA_API_KEY",
+    builtIn: true,
+    kind: "account",
+    keyUrl: "https://chat.ditfa.com/api-keys",
+  },
+  {
+    id: "openai",
+    name: "OpenAI",
+    baseUrl: "https://api.openai.com/v1",
+    envKey: null,
+    builtIn: true,
+    kind: "apiKey",
+    keyUrl: "https://platform.openai.com/api-keys",
+  },
+  {
+    id: "anthropic",
+    name: "Anthropic",
+    baseUrl: "https://api.anthropic.com/v1",
+    envKey: "ANTHROPIC_API_KEY",
+    builtIn: true,
+    kind: "apiKey",
+    keyUrl: "https://console.anthropic.com/settings/keys",
+  },
+  {
+    id: "gemini",
+    name: "Google Gemini",
+    baseUrl: "https://generativelanguage.googleapis.com/v1beta/openai",
+    envKey: "GEMINI_API_KEY",
+    builtIn: true,
+    kind: "apiKey",
+    keyUrl: "https://aistudio.google.com/apikey",
+  },
+  {
+    id: "openrouter",
+    name: "OpenRouter",
+    baseUrl: "https://openrouter.ai/api/v1",
+    envKey: "OPENROUTER_API_KEY",
+    builtIn: true,
+    kind: "apiKey",
+    keyUrl: "https://openrouter.ai/keys",
+  },
+  {
+    id: "deepseek",
+    name: "DeepSeek",
+    baseUrl: "https://api.deepseek.com/v1",
+    envKey: "DEEPSEEK_API_KEY",
+    builtIn: true,
+    kind: "apiKey",
+    keyUrl: "https://platform.deepseek.com/api_keys",
+  },
   {
     id: "ollama",
-    name: "Ollama (local)",
+    name: "Ollama",
     baseUrl: "http://localhost:11434/v1",
     envKey: null,
     builtIn: true,
+    kind: "local",
   },
   {
     id: "lmstudio",
-    name: "LM Studio (local)",
+    name: "LM Studio",
     baseUrl: "http://localhost:1234/v1",
     envKey: null,
     builtIn: true,
+    kind: "local",
   },
 ];
 
+/** Every variable the engine might read a stored key from. */
+export const PROVIDER_ENV_KEYS = BUILT_IN_PROVIDERS.flatMap((provider) =>
+  provider.envKey ? [provider.envKey] : [],
+);
+
+const FETCH_TIMEOUT_MS = 6_000;
+/** Everything an OpenAI-style `/models` lists that cannot run a coding agent. */
+const NOT_CHAT_MODELS = /embed|whisper|tts|dall-e|moderation|audio|transcribe|image|aqa|rerank/i;
+
+/** Reads an OpenAI-style `/models` response, which all the hosted providers speak. */
+export function parseModelList(body: unknown): ModelChoice[] {
+  const data = (body as { data?: unknown }).data;
+  if (!Array.isArray(data)) {
+    return [];
+  }
+  const models: ModelChoice[] = [];
+  for (const raw of data as Record<string, unknown>[]) {
+    if (typeof raw.id !== "string") {
+      continue;
+    }
+    // Gemini prefixes ids with `models/`, which its own API then rejects.
+    const id = raw.id.replace(/^models\//, "");
+    if (NOT_CHAT_MODELS.test(id)) {
+      continue;
+    }
+    const label =
+      typeof raw.display_name === "string"
+        ? raw.display_name
+        : typeof raw.name === "string"
+          ? raw.name
+          : id;
+    models.push({ id, label, description: null, efforts: [], isDefault: false });
+  }
+  return models.sort((a, b) => b.id.localeCompare(a.id));
+}
+
+/** True when a local model server answers on `baseUrl`. */
+export async function probeLocal(baseUrl: string): Promise<boolean> {
+  try {
+    const response = await fetch(`${baseUrl}/models`, { signal: AbortSignal.timeout(800) });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
 /**
- * Reads the provider and model catalog from the running app-server.
+ * Reads the provider and model catalog.
  *
  * Providers come from `config.toml` (`[model_providers.*]`), which the server
  * exposes through `config/read`. Models come from `model/list`, which reflects
