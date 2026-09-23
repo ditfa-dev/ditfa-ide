@@ -2,14 +2,25 @@ import * as vscode from "vscode";
 
 import type { AppServerClient } from "../client/appServerClient";
 import type {
+  SandboxPolicy,
   ServerNotification,
   ThreadStartResponse,
+  TurnError,
   UserInput,
 } from "../protocol";
 import type { Logger } from "../util/logger";
 import type { DitfaSettings } from "../util/settings";
 import { mapThreadItem } from "./itemMapper";
-import type { ChatEntry, PlanStep, TokenUsageView } from "./types";
+import { mergeTranscript, type TranscriptStore } from "./transcriptStore";
+import type {
+  ChatEntry,
+  ErrorAction,
+  FileChangeEntry,
+  FileChangeSummary,
+  PlanStep,
+  TokenUsageView,
+  UserEntry,
+} from "./types";
 
 export interface ThreadContext {
   threadId: string;
@@ -29,6 +40,16 @@ export interface SessionSnapshot {
   context: ThreadContext | null;
 }
 
+export interface TurnOptions {
+  settings: DitfaSettings;
+  sandboxPolicy: SandboxPolicy;
+}
+
+/** Output kept per command. A build log must not become the extension's memory use. */
+const MAX_OUTPUT_CHARS = 200_000;
+/** The same command this many times in one turn means the agent is stuck. */
+const LOOP_LIMIT = 6;
+
 /**
  * Owns one ditfa thread: its transcript, the active turn, and the projection of
  * server notifications into transcript entries.
@@ -47,8 +68,24 @@ export class ThreadSession implements vscode.Disposable {
   private planExplanation: string | null = null;
   private tokenUsage: TokenUsageView | null = null;
   private activeTurnId: string | null = null;
+  /** Set between `turn/start` going out and `turn/started` coming back. */
+  private turnStarting = false;
+
+  /** Turn ids in the order they ran, so a checkpoint knows how far to roll back. */
+  private turnOrder: string[] = [];
+  private turnStartTokens = 0;
+  private turnModel: string | null = null;
+  private retryEntryId: string | null = null;
+  /** The last fatal error, so `turn/completed` repeating it does not add a second card. */
+  private lastErrorMessage: string | null = null;
+  private lastUserMessage: { text: string; input: UserInput[] } | null = null;
+  private commandCounts = new Map<string, number>();
+  private clientMessageCounter = 0;
+  /** Things the agent should hear with the next message, such as hunks the user undid. */
+  private readonly notes: string[] = [];
 
   private readonly entryEmitter = new vscode.EventEmitter<ChatEntry>();
+  private readonly removeEmitter = new vscode.EventEmitter<string>();
   private readonly resetEmitter = new vscode.EventEmitter<void>();
   private readonly planEmitter = new vscode.EventEmitter<{
     plan: PlanStep[];
@@ -57,17 +94,25 @@ export class ThreadSession implements vscode.Disposable {
   private readonly usageEmitter = new vscode.EventEmitter<TokenUsageView | null>();
   private readonly turnEmitter = new vscode.EventEmitter<boolean>();
   private readonly contextEmitter = new vscode.EventEmitter<ThreadContext | null>();
+  private readonly loopEmitter = new vscode.EventEmitter<string>();
+  private readonly appliedEmitter = new vscode.EventEmitter<FileChangeEntry>();
 
   readonly onEntry = this.entryEmitter.event;
+  readonly onRemoveEntry = this.removeEmitter.event;
   readonly onReset = this.resetEmitter.event;
   readonly onPlan = this.planEmitter.event;
   readonly onUsage = this.usageEmitter.event;
   readonly onTurnActiveChanged = this.turnEmitter.event;
   readonly onContextChanged = this.contextEmitter.event;
+  /** Fires with the command the agent keeps repeating. */
+  readonly onLoopDetected = this.loopEmitter.event;
+  /** Fires when a file change moves from waiting to applied. */
+  readonly onFileChangeApplied = this.appliedEmitter.event;
 
   constructor(
     private readonly client: AppServerClient,
     private readonly logger: Logger,
+    private readonly store: TranscriptStore,
   ) {}
 
   get threadId(): string | null {
@@ -75,14 +120,17 @@ export class ThreadSession implements vscode.Disposable {
   }
 
   get turnActive(): boolean {
-    return this.activeTurnId !== null;
+    return this.activeTurnId !== null || this.turnStarting;
+  }
+
+  /** Tokens this turn has consumed so far. */
+  get turnTokens(): number {
+    return (this.tokenUsage?.total ?? 0) - this.turnStartTokens;
   }
 
   snapshot(): SessionSnapshot {
     return {
-      entries: this.entryOrder
-        .map((id) => this.entries.get(id))
-        .filter((entry): entry is ChatEntry => entry !== undefined),
+      entries: this.orderedEntries(),
       plan: this.plan,
       planExplanation: this.planExplanation,
       tokenUsage: this.tokenUsage,
@@ -114,17 +162,24 @@ export class ThreadSession implements vscode.Disposable {
       sandbox: settings.sandboxMode,
     });
 
-    // A resumed thread carries its history; replay it so the transcript matches
-    // what the user saw before.
-    for (const turn of response.thread.turns) {
-      for (const item of turn.items) {
-        const entry = mapThreadItem(item, Date.now());
-        if (entry) {
-          this.upsert(entry);
-        }
-      }
+    const stored = await this.store.load(threadId);
+    const turns = response.thread.turns;
+    this.turnOrder = turns.map((turn) => turn.id);
+    for (const entry of mergeTranscript(turns, stored?.entries ?? null)) {
+      this.insert(entry);
+    }
+    if (stored) {
+      this.plan = stored.plan;
+      this.planExplanation = stored.planExplanation;
+      this.tokenUsage = stored.tokenUsage;
     }
     return this.adoptThread(response);
+  }
+
+  /** Forgets the thread without touching the server; the next message creates a new one. */
+  clear(): void {
+    this.reset();
+    this.contextEmitter.fire(null);
   }
 
   /**
@@ -132,33 +187,66 @@ export class ThreadSession implements vscode.Disposable {
    * it instead of queuing a second turn, which is what the TUI does and what
    * users expect when they type mid-run.
    */
-  async send(text: string, attachments: string[], settings: DitfaSettings): Promise<void> {
+  async send(
+    echo: { text: string; attachments: string[] },
+    input: UserInput[],
+    options: TurnOptions,
+  ): Promise<void> {
     const threadId = this.context?.threadId;
     if (!threadId) {
       throw new Error("No active ditfa thread.");
     }
+    const clientId = `vscode-${Date.now()}-${++this.clientMessageCounter}`;
+    this.lastUserMessage = { text: echo.text, input };
 
-    const input: UserInput[] = [{ type: "text", text, text_elements: [] }];
-    for (const path of attachments) {
-      input.push({ type: "mention", name: path, path });
-    }
-
-    if (this.activeTurnId) {
-      await this.client.request("turn/steer", {
-        threadId,
-        expectedTurnId: this.activeTurnId,
-        input,
-      });
-      return;
-    }
-
-    await this.client.request("turn/start", {
-      threadId,
-      input,
-      model: settings.model || null,
-      effort: settings.reasoningEffort,
-      approvalPolicy: settings.approvalPolicy,
+    // Echo the message immediately: app-server only emits the user item once the
+    // turn starts, and a message that vanishes on send feels broken. The server's
+    // copy carries `clientId` back and takes over this row.
+    this.upsert({
+      id: clientId,
+      kind: "user",
+      at: Date.now(),
+      text: echo.text,
+      attachments: echo.attachments,
+      clientId,
+      turnId: this.activeTurnId,
     });
+
+    try {
+      if (this.activeTurnId) {
+        await this.client.request("turn/steer", {
+          threadId,
+          expectedTurnId: this.activeTurnId,
+          clientUserMessageId: clientId,
+          input,
+        });
+        return;
+      }
+
+      this.setTurnStarting(true);
+      const { settings, sandboxPolicy } = options;
+      await this.client.request("turn/start", {
+        threadId,
+        clientUserMessageId: clientId,
+        input,
+        model: settings.model || null,
+        effort: settings.reasoningEffort,
+        approvalPolicy: settings.approvalPolicy,
+        sandboxPolicy,
+      });
+    } catch (error) {
+      this.setTurnStarting(false);
+      this.remove(clientId);
+      throw error;
+    }
+  }
+
+  /** Sends the last message again, for the Retry button on a failed turn. */
+  async resend(options: TurnOptions): Promise<void> {
+    if (this.lastUserMessage) {
+      const { text, input } = this.lastUserMessage;
+      await this.send({ text, attachments: [] }, input, options);
+    }
   }
 
   async interrupt(): Promise<void> {
@@ -168,6 +256,112 @@ export class ThreadSession implements vscode.Disposable {
       return;
     }
     await this.client.request("turn/interrupt", { threadId, turnId });
+  }
+
+  async compact(): Promise<void> {
+    const threadId = this.context?.threadId;
+    if (threadId) {
+      await this.client.request("thread/compact/start", { threadId });
+    }
+  }
+
+  async review(): Promise<void> {
+    const threadId = this.context?.threadId;
+    if (threadId) {
+      await this.client.request("review/start", {
+        threadId,
+        target: { type: "uncommittedChanges" },
+      });
+    }
+  }
+
+  /** Applied file changes from `turnId` onward, oldest first. */
+  changesSince(turnId: string): FileChangeSummary[] {
+    const from = this.turnOrder.indexOf(turnId);
+    const turns = new Set(from === -1 ? [turnId] : this.turnOrder.slice(from));
+    const changes: FileChangeSummary[] = [];
+    for (const entry of this.orderedEntries()) {
+      if (entry.kind === "fileChange" && entry.status === "applied" && turns.has(entry.turnId ?? "")) {
+        changes.push(...entry.changes);
+      }
+    }
+    return changes;
+  }
+
+  /** Changes made by exactly one turn. */
+  changesIn(turnId: string): FileChangeSummary[] {
+    return this.orderedEntries().flatMap((entry) =>
+      entry.kind === "fileChange" && entry.status === "applied" && entry.turnId === turnId
+        ? entry.changes
+        : [],
+    );
+  }
+
+  /**
+   * Records that the user took changes back out of an applied edit, so the card
+   * shows it, a later restore reverses the right diff, and the agent is told.
+   */
+  markReverted(entryId: string, path: string, hunks: number[], undone: boolean, note: string): void {
+    const entry = this.entries.get(entryId);
+    if (entry?.kind !== "fileChange") {
+      return;
+    }
+    const changes = entry.changes.map((change) =>
+      change.path !== path
+        ? change
+        : {
+            ...change,
+            reverted: [...new Set([...(change.reverted ?? []), ...hunks])].sort((a, b) => a - b),
+            undone: change.undone || undone,
+          },
+    );
+    this.upsert({ ...entry, changes });
+    this.notes.push(note);
+    void this.persist();
+  }
+
+  /** Hands over, and forgets, what the agent should be told with the next message. */
+  takeNotes(): string[] {
+    return this.notes.splice(0);
+  }
+
+  get latestTurnId(): string | null {
+    return this.turnOrder[this.turnOrder.length - 1] ?? null;
+  }
+
+  userEntryFor(turnId: string): UserEntry | null {
+    const entry = this.orderedEntries().find(
+      (candidate) => candidate.kind === "user" && candidate.turnId === turnId,
+    );
+    return entry?.kind === "user" ? entry : null;
+  }
+
+  /**
+   * Drops `turnId` and everything after it from the conversation. Files are the
+   * caller's job; the server only rewinds its own history.
+   */
+  async rollbackTo(turnId: string): Promise<void> {
+    const threadId = this.context?.threadId;
+    const index = this.turnOrder.indexOf(turnId);
+    if (!threadId || index === -1) {
+      return;
+    }
+    const dropped = new Set(this.turnOrder.slice(index));
+    await this.client.request("thread/rollback", { threadId, numTurns: dropped.size });
+
+    this.turnOrder = this.turnOrder.slice(0, index);
+    for (const entry of this.orderedEntries()) {
+      if (entry.turnId && dropped.has(entry.turnId)) {
+        this.entries.delete(entry.id);
+      }
+    }
+    const kept = this.entryOrder.filter((id) => this.entries.has(id));
+    this.entryOrder.length = 0;
+    this.entryOrder.push(...kept);
+    this.plan = [];
+    this.planExplanation = null;
+    void this.persist();
+    this.resetEmitter.fire();
   }
 
   /** Routes a server notification into transcript state. Unknown methods are ignored. */
@@ -191,6 +385,12 @@ export class ThreadSession implements vscode.Disposable {
 
       case "turn/started":
         this.activeTurnId = notification.params.turn.id;
+        this.turnStarting = false;
+        this.turnOrder.push(notification.params.turn.id);
+        this.turnStartTokens = this.tokenUsage?.total ?? 0;
+        this.turnModel = this.context?.model ?? null;
+        this.lastErrorMessage = null;
+        this.commandCounts.clear();
         this.plan = [];
         this.planExplanation = null;
         this.planEmitter.fire({ plan: this.plan, explanation: null });
@@ -198,13 +398,27 @@ export class ThreadSession implements vscode.Disposable {
         break;
 
       case "turn/completed": {
+        const turn = notification.params.turn;
         this.activeTurnId = null;
+        this.turnStarting = false;
+        this.clearRetry();
         this.finalizeStreaming();
-        this.turnEmitter.fire(false);
-        const error = notification.params.turn.error;
-        if (error) {
-          this.pushError(error.message, error.additionalDetails, false);
+        if (turn.error && turn.error.message !== this.lastErrorMessage) {
+          this.pushError(turn.error, turn.id);
         }
+        if (turn.status === "completed" && this.turnTokens > 0) {
+          this.upsert({
+            id: `stats-${turn.id}`,
+            kind: "turnStats",
+            at: Date.now(),
+            turnId: turn.id,
+            model: this.turnModel,
+            tokens: this.turnTokens,
+            durationMs: turn.durationMs,
+          });
+        }
+        this.turnEmitter.fire(false);
+        void this.persist();
         break;
       }
 
