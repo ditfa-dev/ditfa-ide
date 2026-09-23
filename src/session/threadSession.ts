@@ -424,23 +424,49 @@ export class ThreadSession implements vscode.Disposable {
 
       case "item/started":
       case "item/completed": {
-        const entry = mapThreadItem(notification.params.item, Date.now());
-        if (entry) {
-          this.upsert(this.preserveStreamedText(entry));
+        const { item, turnId } = notification.params;
+        const entry = mapThreadItem(item, Date.now(), turnId);
+        if (!entry) {
+          break;
+        }
+        this.clearRetry();
+        if (entry.kind === "user" && this.adoptEcho(entry)) {
+          break;
+        }
+        const previous = this.entries.get(entry.id);
+        this.upsert(this.preserveStreamedText(entry));
+        if (
+          entry.kind === "fileChange" &&
+          entry.status === "applied" &&
+          !(previous?.kind === "fileChange" && previous.status === "applied")
+        ) {
+          this.appliedEmitter.fire(entry);
+        }
+        if (entry.kind === "command" && notification.method === "item/started") {
+          this.trackCommand(entry.command);
         }
         break;
       }
 
       case "item/agentMessage/delta":
-        this.appendAssistantDelta(notification.params.itemId, notification.params.delta);
+        this.clearRetry();
+        this.appendAssistantDelta(
+          notification.params.itemId,
+          notification.params.turnId,
+          notification.params.delta,
+        );
         break;
 
       case "item/reasoning/summaryTextDelta":
-        this.appendReasoningDelta(notification.params.itemId, notification.params.delta);
+        this.appendReasoningDelta(
+          notification.params.itemId,
+          notification.params.turnId,
+          notification.params.delta,
+        );
         break;
 
       case "item/reasoning/summaryPartAdded":
-        this.appendReasoningDelta(notification.params.itemId, "\n\n");
+        this.appendReasoningDelta(notification.params.itemId, notification.params.turnId, "\n\n");
         break;
 
       case "item/commandExecution/outputDelta":
@@ -458,10 +484,13 @@ export class ThreadSession implements vscode.Disposable {
 
       case "thread/tokenUsage/updated": {
         const usage = notification.params.tokenUsage;
-        const used = usage.total.totalTokens;
+        // `total` adds up every request ever made; only `last` says what is in
+        // the context window now.
+        const used = usage.last.totalTokens;
         const window = usage.modelContextWindow;
         this.tokenUsage = {
           used,
+          total: usage.total.totalTokens,
           contextWindow: window,
           percentUsed: window && window > 0 ? Math.min(100, (used / window) * 100) : null,
         };
@@ -474,11 +503,13 @@ export class ThreadSession implements vscode.Disposable {
         break;
 
       case "error":
-        this.pushError(
-          notification.params.error.message,
-          notification.params.error.additionalDetails,
-          notification.params.willRetry,
-        );
+        if (notification.params.willRetry) {
+          this.showRetry(notification.params.error, notification.params.turnId);
+        } else {
+          this.clearRetry();
+          this.lastErrorMessage = notification.params.error.message;
+          this.pushError(notification.params.error, notification.params.turnId);
+        }
         break;
 
       case "warning":
@@ -488,7 +519,11 @@ export class ThreadSession implements vscode.Disposable {
         break;
 
       case "model/rerouted":
-        this.pushNotice("The request was rerouted to a different model.", "info");
+        this.turnModel = notification.params.toModel;
+        this.pushNotice(
+          `Switched from ${notification.params.fromModel} to ${notification.params.toModel} for this request.`,
+          "info",
+        );
         break;
 
       default:
@@ -496,13 +531,47 @@ export class ThreadSession implements vscode.Disposable {
     }
   }
 
+  /** Adds a host-side notice to the transcript, such as a restart or a guard tripping. */
+  notice(text: string, tone: "info" | "warning" = "info"): void {
+    this.pushNotice(text, tone);
+  }
+
   dispose(): void {
     this.entryEmitter.dispose();
+    this.removeEmitter.dispose();
     this.resetEmitter.dispose();
     this.planEmitter.dispose();
     this.usageEmitter.dispose();
     this.turnEmitter.dispose();
     this.contextEmitter.dispose();
+    this.loopEmitter.dispose();
+    this.appliedEmitter.dispose();
+  }
+
+  private orderedEntries(): ChatEntry[] {
+    return this.entryOrder
+      .map((id) => this.entries.get(id))
+      .filter((entry): entry is ChatEntry => entry !== undefined);
+  }
+
+  private setTurnStarting(starting: boolean): void {
+    if (this.turnStarting !== starting) {
+      this.turnStarting = starting;
+      this.turnEmitter.fire(this.turnActive);
+    }
+  }
+
+  private async persist(): Promise<void> {
+    const threadId = this.context?.threadId;
+    if (threadId) {
+      await this.store.save({
+        threadId,
+        entries: this.orderedEntries(),
+        plan: this.plan,
+        planExplanation: this.planExplanation,
+        tokenUsage: this.tokenUsage,
+      });
+    }
   }
 
   private adoptThread(response: ThreadStartResponse): ThreadContext {
@@ -516,6 +585,7 @@ export class ThreadSession implements vscode.Disposable {
     };
     this.context = context;
     this.contextEmitter.fire(context);
+    this.resetEmitter.fire();
     this.logger.info(
       `thread ${context.threadId} ready (${context.provider}/${context.model}) in ${context.cwd}`,
     );
@@ -540,16 +610,70 @@ export class ThreadSession implements vscode.Disposable {
     this.planExplanation = null;
     this.tokenUsage = null;
     this.activeTurnId = null;
+    this.turnStarting = false;
     this.context = null;
+    this.turnOrder = [];
+    this.turnStartTokens = 0;
+    this.retryEntryId = null;
+    this.lastErrorMessage = null;
+    this.lastUserMessage = null;
+    this.commandCounts.clear();
+    this.notes.length = 0;
     this.resetEmitter.fire();
   }
 
-  private upsert(entry: ChatEntry): void {
+  private insert(entry: ChatEntry): void {
     if (!this.entries.has(entry.id)) {
       this.entryOrder.push(entry.id);
     }
     this.entries.set(entry.id, entry);
+  }
+
+  private upsert(entry: ChatEntry): void {
+    this.insert(entry);
     this.entryEmitter.fire(entry);
+  }
+
+  private remove(id: string): void {
+    if (this.entries.delete(id)) {
+      const index = this.entryOrder.indexOf(id);
+      if (index !== -1) {
+        this.entryOrder.splice(index, 1);
+      }
+      this.removeEmitter.fire(id);
+    }
+  }
+
+  /** Swaps the local echo for the server's copy, keeping its place in the transcript. */
+  private adoptEcho(entry: UserEntry): boolean {
+    if (this.entries.has(entry.id)) {
+      // `item/completed` for a message already adopted on `item/started`.
+      return true;
+    }
+    const clientId = entry.clientId;
+    const echo = clientId ? this.entries.get(clientId) : undefined;
+    if (!clientId || echo?.kind !== "user") {
+      return false;
+    }
+    // The echo's attachments are the labels the user picked; keep those.
+    const adopted: UserEntry = { ...echo, id: entry.id, turnId: entry.turnId ?? echo.turnId ?? null };
+    this.entries.delete(clientId);
+    this.entries.set(entry.id, adopted);
+    const index = this.entryOrder.indexOf(clientId);
+    if (index !== -1) {
+      this.entryOrder[index] = entry.id;
+    }
+    this.removeEmitter.fire(clientId);
+    this.entryEmitter.fire(adopted);
+    return true;
+  }
+
+  private trackCommand(command: string): void {
+    const seen = (this.commandCounts.get(command) ?? 0) + 1;
+    this.commandCounts.set(command, seen);
+    if (seen === LOOP_LIMIT) {
+      this.loopEmitter.fire(command);
+    }
   }
 
   /**
@@ -573,28 +697,32 @@ export class ThreadSession implements vscode.Disposable {
     return entry;
   }
 
-  private appendAssistantDelta(itemId: string, delta: string): void {
+  private appendAssistantDelta(itemId: string, turnId: string, delta: string): void {
     const existing = this.entries.get(itemId);
     if (existing && existing.kind === "assistant") {
       this.upsert({ ...existing, text: existing.text + delta, streaming: true });
       return;
     }
-    this.upsert({ id: itemId, kind: "assistant", at: Date.now(), text: delta, streaming: true });
+    this.upsert({ id: itemId, kind: "assistant", at: Date.now(), turnId, text: delta, streaming: true });
   }
 
-  private appendReasoningDelta(itemId: string, delta: string): void {
+  private appendReasoningDelta(itemId: string, turnId: string, delta: string): void {
     const existing = this.entries.get(itemId);
     if (existing && existing.kind === "reasoning") {
       this.upsert({ ...existing, summary: existing.summary + delta, streaming: true });
       return;
     }
-    this.upsert({ id: itemId, kind: "reasoning", at: Date.now(), summary: delta, streaming: true });
+    this.upsert({ id: itemId, kind: "reasoning", at: Date.now(), turnId, summary: delta, streaming: true });
   }
 
   private appendCommandOutput(itemId: string, delta: string): void {
     const existing = this.entries.get(itemId);
     if (existing && existing.kind === "command") {
-      this.upsert({ ...existing, output: existing.output + delta });
+      const output = existing.output + delta;
+      this.upsert({
+        ...existing,
+        output: output.length > MAX_OUTPUT_CHARS ? output.slice(-MAX_OUTPUT_CHARS) : output,
+      });
     }
   }
 
@@ -609,18 +737,44 @@ export class ThreadSession implements vscode.Disposable {
         this.upsert({ ...entry, streaming: false });
       } else if (entry.kind === "reasoning" && entry.streaming) {
         this.upsert({ ...entry, streaming: false });
+      } else if (entry.kind === "command" && entry.status === "running") {
+        this.upsert({ ...entry, status: "aborted" });
       }
     }
   }
 
-  private pushError(message: string, details: string | null, retrying: boolean): void {
+  /** One row for the whole retry sequence, updated in place. */
+  private showRetry(error: TurnError, turnId: string): void {
+    const id = this.retryEntryId ?? `retry-${turnId}`;
+    this.retryEntryId = id;
+    this.upsert({
+      id,
+      kind: "error",
+      at: Date.now(),
+      turnId,
+      message: error.message,
+      details: error.additionalDetails,
+      retrying: true,
+    });
+  }
+
+  private clearRetry(): void {
+    if (this.retryEntryId) {
+      this.remove(this.retryEntryId);
+      this.retryEntryId = null;
+    }
+  }
+
+  private pushError(error: TurnError, turnId: string): void {
     this.upsert({
       id: `error-${Date.now()}-${this.entryOrder.length}`,
       kind: "error",
       at: Date.now(),
-      message,
-      details,
-      retrying,
+      turnId,
+      message: error.message,
+      details: error.additionalDetails,
+      retrying: false,
+      action: suggestAction(error),
     });
   }
 
@@ -629,8 +783,24 @@ export class ThreadSession implements vscode.Disposable {
       id: `notice-${Date.now()}-${this.entryOrder.length}`,
       kind: "notice",
       at: Date.now(),
+      turnId: this.activeTurnId,
       text,
       tone,
     });
   }
+}
+
+/** Maps an engine error onto the one action that would fix it. */
+function suggestAction(error: TurnError): ErrorAction {
+  const info = JSON.stringify(error.ditfaErrorInfo ?? "").toLowerCase();
+  if (info.includes("unauthorized")) {
+    return "signIn";
+  }
+  if (info.includes("contextwindowexceeded")) {
+    return "compact";
+  }
+  if (info.includes("usagelimit") || info.includes("usagenotincluded") || info.includes("modelcap")) {
+    return "selectModel";
+  }
+  return "retry";
 }
