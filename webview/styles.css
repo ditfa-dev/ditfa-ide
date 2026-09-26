@@ -1,238 +1,326 @@
 /*
- * Everything is expressed in VS Code theme variables so the panel inherits the
- * user's colour scheme rather than fighting it. No fixed colours, no web fonts.
+ * Ditfa Code panel. Structure and neutrals come from the editor's own theme, so
+ * the panel belongs in any color theme; the brand shows up where it means
+ * something: the mark, the send button, focus, and progress.
  */
-
 :root {
-  --ditfa-gap: 12px;
-  --ditfa-radius: 6px;
-  --ditfa-border: var(--vscode-panel-border, rgba(128, 128, 128, 0.35));
-  --ditfa-muted: var(--vscode-descriptionForeground);
-  --ditfa-add: var(--vscode-gitDecoration-addedResourceForeground, #4caf50);
-  --ditfa-del: var(--vscode-gitDecoration-deletedResourceForeground, #f44336);
+  --ditfa-sky: #7cc0ec;
+  --ditfa-blue: #4f94c5;
+  --ditfa-deep: #1d3a73;
+  --brand-gradient: linear-gradient(160deg, var(--ditfa-sky), var(--ditfa-blue) 45%, var(--ditfa-deep));
+  --accent: #3570a8;
+  --bg: var(--vscode-sideBar-background, var(--vscode-editor-background));
+  --fg: var(--vscode-foreground);
+  --muted: var(--vscode-descriptionForeground);
+  --border: var(--vscode-widget-border, var(--vscode-panel-border, rgba(127, 127, 127, 0.25)));
+  --surface: var(--vscode-editorWidget-background, rgba(127, 127, 127, 0.08));
+  --hover: var(--vscode-list-hoverBackground, rgba(127, 127, 127, 0.14));
+  --input: var(--vscode-input-background);
+  --mono: var(--vscode-editor-font-family, ui-monospace, monospace);
+  --add: var(--vscode-gitDecoration-addedResourceForeground, #3fb950);
+  --del: var(--vscode-gitDecoration-deletedResourceForeground, #f85149);
+  --danger: var(--vscode-errorForeground, #f85149);
+  --warn: var(--vscode-editorWarning-foreground, #d29922);
+  --radius: 10px;
+}
+body.vscode-dark,
+body.vscode-high-contrast {
+  --accent: var(--ditfa-sky);
 }
 
 * {
   box-sizing: border-box;
 }
-
 html,
-body {
+body,
+#root {
   height: 100%;
   margin: 0;
   padding: 0;
 }
-
 body {
+  background: var(--bg);
+  color: var(--fg);
   font-family: var(--vscode-font-family);
-  font-size: var(--vscode-font-size);
-  color: var(--vscode-foreground);
-  background: transparent;
+  font-size: var(--vscode-font-size, 13px);
+  line-height: 1.5;
+  overflow: hidden;
 }
-
 #root {
   display: flex;
   flex-direction: column;
-  height: 100vh;
-  overflow: hidden;
+  position: relative;
 }
-
-/* ---------------------------------------------------------------- header */
-
-.header {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 8px;
-  border-bottom: 1px solid var(--ditfa-border);
-  flex: 0 0 auto;
-  overflow-x: auto;
-  scrollbar-width: none;
+[hidden] {
+  display: none !important;
 }
-
-.header::-webkit-scrollbar {
-  display: none;
-}
-
-.chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  padding: 3px 8px;
-  border: 1px solid var(--ditfa-border);
-  border-radius: 999px;
-  background: transparent;
-  color: var(--vscode-foreground);
-  font-family: inherit;
-  font-size: 0.85em;
+button {
+  font: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  padding: 0;
   cursor: pointer;
-  white-space: nowrap;
-  max-width: 18rem;
-  overflow: hidden;
-  text-overflow: ellipsis;
+}
+button:disabled {
+  cursor: default;
+  opacity: 0.5;
+}
+:focus-visible {
+  outline: 1px solid var(--vscode-focusBorder, var(--ditfa-blue));
+  outline-offset: 1px;
+}
+.icon {
+  width: 16px;
+  height: 16px;
+  flex: none;
+}
+code,
+pre,
+kbd {
+  font-family: var(--mono);
+  font-size: 0.92em;
 }
 
-.chip:hover {
-  background: var(--vscode-toolbar-hoverBackground);
+/* Mark and its motion, matching the website. */
+.ditfa-mark {
+  display: block;
+  overflow: visible;
 }
-
-.chip-icon {
-  opacity: 0.7;
+.ditfa-mark .ditfa-band,
+.ditfa-mark .ditfa-d,
+.ditfa-mark .ditfa-band > path {
+  transform-box: view-box;
 }
-
-.chip-right {
-  margin-left: auto;
+@media (prefers-reduced-motion: no-preference) {
+  .ditfa-mark[data-motion="assemble"] .ditfa-band {
+    animation: ditfa-band-in 0.72s cubic-bezier(0.16, 1, 0.3, 1) both;
+    animation-delay: calc(var(--i) * 42ms);
+  }
+  .ditfa-mark[data-motion="assemble"] .ditfa-d {
+    animation: ditfa-d-in 0.8s cubic-bezier(0.16, 1, 0.3, 1) 120ms both;
+  }
+  .ditfa-mark[data-motion="ripple"] .ditfa-band > path {
+    animation: ditfa-band-ripple 1.5s cubic-bezier(0.22, 1, 0.36, 1) infinite;
+    animation-delay: calc(var(--i) * 70ms);
+  }
+  .moving-lines span {
+    animation: ditfa-line-drift 18s linear infinite;
+  }
 }
-
-.chip-usage {
-  opacity: 0.65;
-  font-variant-numeric: tabular-nums;
-}
-
-.header-error {
-  flex-direction: column;
-  align-items: stretch;
-  gap: 8px;
-  background: var(--vscode-inputValidation-errorBackground);
-  border-bottom-color: var(--vscode-inputValidation-errorBorder);
-}
-
-.header-error-body {
-  display: flex;
-  gap: 8px;
-  align-items: flex-start;
-}
-
-.header-error-actions {
-  display: flex;
-  gap: 6px;
-}
-
-/* ------------------------------------------------------------ transcript */
-
-.scroll {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  padding: var(--ditfa-gap);
-  display: flex;
-  flex-direction: column;
-  gap: var(--ditfa-gap);
-}
-
-.transcript {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
-}
-
-.empty {
-  padding: 28px 8px;
-  color: var(--ditfa-muted);
-}
-
-.empty-title {
-  font-size: 1.3em;
-  font-weight: 600;
-  color: var(--vscode-foreground);
-  margin-bottom: 8px;
-}
-
-.empty-hints {
-  margin: 14px 0 0;
-  padding-left: 18px;
-  line-height: 1.9;
-}
-
-.empty-hints kbd {
-  border: 1px solid var(--ditfa-border);
-  border-radius: 3px;
-  padding: 0 4px;
-  font-family: var(--vscode-editor-font-family);
-}
-
-.entry {
-  animation: fade-in 120ms ease-out;
-}
-
-@keyframes fade-in {
+@keyframes ditfa-band-in {
   from {
     opacity: 0;
-    transform: translateY(2px);
+    transform: translateX(-140px);
   }
   to {
     opacity: 1;
     transform: none;
   }
 }
-
-@media (prefers-reduced-motion: reduce) {
-  .entry {
-    animation: none;
+@keyframes ditfa-d-in {
+  from {
+    opacity: 0;
+    transform: translateX(120px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+@keyframes ditfa-band-ripple {
+  0%,
+  55%,
+  100% {
+    transform: none;
+  }
+  25% {
+    transform: translateX(-110px);
+  }
+}
+@keyframes ditfa-line-drift {
+  from {
+    transform: translateX(-30%);
+  }
+  to {
+    transform: translateX(30%);
   }
 }
 
-.entry-user {
+/* The mark's stripes, drifting behind a heading. */
+.moving-lines {
+  position: absolute;
+  inset: 0;
+  overflow: hidden;
+  pointer-events: none;
+  -webkit-mask-image: radial-gradient(70% 60% at 50% 35%, #000, transparent);
+  mask-image: radial-gradient(70% 60% at 50% 35%, #000, transparent);
+}
+.moving-lines span {
+  position: absolute;
+  height: 6px;
+  width: 42%;
+  border-radius: 6px;
+  background: var(--ditfa-blue);
+  opacity: 0.11;
+}
+.moving-lines span:nth-child(1) { top: 8%; left: 4%; height: 12px; animation-duration: 21s; }
+.moving-lines span:nth-child(2) { top: 18%; left: 52%; animation-duration: 15s; animation-direction: reverse; }
+.moving-lines span:nth-child(3) { top: 28%; left: 18%; height: 9px; animation-duration: 25s; }
+.moving-lines span:nth-child(4) { top: 38%; left: 60%; height: 13px; animation-duration: 19s; animation-direction: reverse; }
+.moving-lines span:nth-child(5) { top: 48%; left: -6%; animation-duration: 17s; }
+.moving-lines span:nth-child(6) { top: 58%; left: 44%; height: 9px; animation-duration: 23s; animation-direction: reverse; }
+.moving-lines span:nth-child(7) { top: 68%; left: 12%; height: 12px; animation-duration: 20s; }
+.moving-lines span:nth-child(8) { top: 78%; left: 58%; animation-duration: 14s; animation-direction: reverse; }
+.moving-lines span:nth-child(9) { top: 88%; left: 26%; height: 8px; animation-duration: 26s; }
+
+/* Top bar */
+.topbar {
   display: flex;
-  justify-content: flex-end;
+  align-items: center;
+  gap: 2px;
+  padding: 6px 8px;
+  border-bottom: 1px solid var(--border);
+  flex: none;
+}
+.topbar-mark {
+  width: 18px;
+  height: 18px;
+  margin-inline-end: 6px;
+  flex: none;
+}
+.thread-title {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+  padding: 2px 4px;
+  border-radius: 6px;
+  font-weight: 600;
+  text-align: start;
+}
+.thread-title span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.thread-title .icon {
+  opacity: 0.6;
+}
+.thread-title:hover,
+.tool:hover:not(:disabled) {
+  background: var(--hover);
+}
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  height: 26px;
+  min-width: 26px;
+  justify-content: center;
+  padding: 0 5px;
+  border-radius: 6px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+.tool:hover:not(:disabled) {
+  color: var(--fg);
+}
+.tool.danger {
+  color: var(--danger);
+}
+.spacer {
+  flex: 1;
 }
 
-.user-bubble {
-  background: var(--vscode-input-background);
-  border: 1px solid var(--ditfa-border);
-  border-radius: var(--ditfa-radius);
+/* Transcript */
+.scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  overscroll-behavior: contain;
+  padding: 12px 12px 4px;
+  position: relative;
+}
+.transcript {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+/* Only the welcome screen fills the panel; a real transcript hugs its content. */
+.transcript:has(.empty) {
+  min-height: 100%;
+}
+.entry {
+  /* Off-screen rows skip layout and paint, so long threads stay fast. */
+  content-visibility: auto;
+  contain-intrinsic-size: auto 48px;
+  min-width: 0;
+}
+.entry-user {
+  position: relative;
+  margin-top: 6px;
+}
+.bubble {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
   padding: 8px 10px;
-  max-width: 92%;
-  white-space: pre-wrap;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
-
 .chips {
   display: flex;
   flex-wrap: wrap;
   gap: 4px;
   margin-top: 6px;
 }
-
-.mini-chip {
-  display: inline-flex;
+.row-action {
+  position: absolute;
+  inset-block-start: -9px;
+  inset-inline-end: 8px;
+  display: none;
   align-items: center;
   gap: 3px;
-  font-size: 0.8em;
-  padding: 1px 6px;
-  border-radius: 999px;
-  background: var(--vscode-badge-background);
-  color: var(--vscode-badge-foreground);
+  padding: 0 7px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  font-size: 11px;
 }
-
-.mini-chip button {
-  border: none;
-  background: transparent;
-  color: inherit;
-  cursor: pointer;
-  padding: 0 0 0 2px;
-  font-size: 1.1em;
-  line-height: 1;
+.row-action .icon {
+  width: 12px;
+  height: 12px;
 }
-
-/* ----------------------------------------------------------- markdown */
+.entry-user:hover .row-action,
+.row-action:focus-visible {
+  display: inline-flex;
+}
+.row-action:hover {
+  color: var(--fg);
+}
 
 .markdown {
-  line-height: 1.6;
-  word-break: break-word;
+  overflow-wrap: anywhere;
 }
-
-.markdown > *:first-child {
+.markdown > :first-child {
   margin-top: 0;
 }
-
-.markdown > *:last-child {
+.markdown > :last-child {
   margin-bottom: 0;
 }
-
-.markdown p {
-  margin: 0 0 10px;
+.markdown p,
+.markdown ul,
+.markdown ol,
+.markdown blockquote {
+  margin: 0 0 8px;
 }
-
+.markdown ul,
+.markdown ol {
+  padding-inline-start: 20px;
+}
 .markdown h3,
 .markdown h4,
 .markdown h5,

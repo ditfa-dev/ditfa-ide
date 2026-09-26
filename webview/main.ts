@@ -1,15 +1,33 @@
 import type {
-  ApprovalRequest,
+  ActiveEditorInfo,
+  AgentMode,
+  ApprovalAnswer,
   ChatEntry,
+  ContextAttachment,
   FileChangeSummary,
+  FileSuggestion,
   HostMessage,
-  PlanStep,
-  SessionHeader,
+  ModelCatalog,
   SessionState,
-  TokenUsageView,
+  SetupOption,
+  SlashCommand,
+  ThreadSummary,
   WebviewMessage,
 } from "../src/session/types";
-import { escapeHtml, renderMarkdown, stripAnsi } from "./markdown";
+import {
+  commandOutputHtml,
+  commandStatusLabel,
+  diffStat,
+  formatTokens,
+  renderApproval,
+  renderEntry,
+  sumChanges,
+  timeAgo,
+  type RenderContext,
+} from "./entries";
+import { icons } from "./icons";
+import { escapeHtml, renderMarkdown, token, whole } from "./markdown";
+import { markSvg } from "./mark";
 
 declare function acquireVsCodeApi(): {
   postMessage(message: WebviewMessage): void;
@@ -17,23 +35,52 @@ declare function acquireVsCodeApi(): {
   setState<T>(state: T): void;
 };
 
+interface Draft {
+  text: string;
+  attachments: ContextAttachment[];
+}
+
+type Popover =
+  | { kind: "files"; items: FileSuggestion[]; index: number }
+  | { kind: "slash"; items: SlashCommand[]; index: number }
+  | { kind: "modes"; index: number }
+  | { kind: "models"; catalog: ModelCatalog | null; index: number; filter: string };
+
+const MODES: { id: AgentMode; label: string; detail: string; icon: string }[] = [
+  { id: "plan", label: "Plan", detail: "Reads and plans. Writing is blocked by the sandbox.", icon: icons.plan },
+  { id: "ask", label: "Ask first", detail: "Asks before every edit and command.", icon: icons.shield },
+  { id: "auto", label: "Auto", detail: "Works inside this workspace; asks to step outside it.", icon: icons.bolt },
+  { id: "full", label: "Full access", detail: "No sandbox and no questions. Disposable machines only.", icon: icons.warn },
+];
+
+const STARTERS = [
+  "Explain how this project is structured",
+  "Find the most likely bug in this codebase",
+  "Write tests for the code I have open",
+];
+
+const IMAGE_LIMIT_BYTES = 8_000_000;
+
 const vscode = acquireVsCodeApi();
 
 const state: SessionState = {
   header: {
     connection: "starting",
     connectionError: null,
+    install: null,
     threadId: null,
     threadName: null,
     cwd: null,
+    workspaceOpen: true,
     provider: null,
+    providerLabel: null,
     model: null,
     reasoningEffort: null,
-    approvalPolicy: "on-request",
-    sandboxMode: "workspace-write",
+    mode: "auto",
     accountLabel: null,
     planLabel: null,
     usagePercent: null,
+    needsSetup: false,
   },
   entries: [],
   plan: [],
@@ -44,39 +91,111 @@ const state: SessionState = {
   showReasoning: true,
 };
 
-/** Rendered entry nodes, so a delta re-renders one row instead of the transcript. */
+/** Rendered rows, so a delta touches one row instead of the transcript. */
 const entryNodes = new Map<string, HTMLElement>();
-/** Code block text per entry, keyed for the copy buttons. */
-const codeBlocksByEntry = new Map<string, string[]>();
-const collapsedEntries = new Set<string>();
+const entriesById = new Map<string, ChatEntry>();
+const expanded = new Set<string>();
+const codeBlocks = new Map<string, string[]>();
 
-let attachments: string[] = [];
+const saved = safeState();
+let attachments: ContextAttachment[] = saved.attachments;
+let activeEditor: ActiveEditorInfo | null = null;
+let includeActiveFile = true;
+let pendingSkill: { name: string; path: string } | null = null;
+let slashCommands: SlashCommand[] = [];
+let setupOptions: SetupOption[] = [];
 let suggestionToken = 0;
-let activeSuggestions: { label: string; path: string }[] = [];
-let suggestionIndex = 0;
+let popover: Popover | null = null;
+let threads: ThreadSummary[] | null = null;
+let historyOpen = false;
+let historySearchTimer = 0;
+let confirmingDelete: string | null = null;
+let promptCursor = -1;
+let planOpen = true;
+let turnStartedAt = 0;
+let workingTimer = 0;
+let lastGate = "";
 
 const root = document.getElementById("root") as HTMLDivElement;
-render();
+root.innerHTML = `
+  <header class="topbar" id="topbar"></header>
+  <main class="scroll" id="scroll">
+    <div class="transcript" id="transcript"></div>
+    <div class="working" id="working" hidden></div>
+    <div class="approvals" id="approvals"></div>
+  </main>
+  <button class="jump" id="jump" type="button" hidden>${icons.chevron}<span>Latest</span></button>
+  <footer class="footer" id="footer">
+    <div class="popover" id="popover" hidden></div>
+    <div class="plan" id="plan" hidden></div>
+    <div class="changes" id="changes" hidden></div>
+    <div class="composer" id="composer-box">
+      <div class="chips-row" id="attachments"></div>
+      <textarea id="composer" rows="1" dir="auto" placeholder="Ask Ditfa to build, explain, or fix something"></textarea>
+      <div class="toolbar">
+        <button class="tool" id="attach" type="button" title="Attach a file (@)">${icons.at}</button>
+        <button class="tool mode" id="mode-button" type="button"></button>
+        <span class="spacer"></span>
+        <button class="ring" id="ring" type="button" hidden></button>
+        <button class="tool model" id="model-button" type="button"></button>
+        <button class="send" id="send" type="button" title="Send">${icons.send}</button>
+      </div>
+    </div>
+  </footer>
+  <section class="gate" id="gate" hidden></section>
+  <section class="history" id="history" hidden></section>
+`;
 
-window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
-  const message = event.data;
+const composer = document.getElementById("composer") as HTMLTextAreaElement;
+const scroll = document.getElementById("scroll") as HTMLElement;
+const transcript = document.getElementById("transcript") as HTMLElement;
+
+composer.value = saved.text;
+autoGrow();
+wireEvents();
+renderAll();
+
+window.addEventListener("message", (event: MessageEvent<HostMessage>) => handleMessage(event.data));
+window.addEventListener("error", (event) =>
+  vscode.postMessage({ type: "webviewError", message: event.message }),
+);
+window.addEventListener("unhandledrejection", (event) =>
+  vscode.postMessage({ type: "webviewError", message: String(event.reason) }),
+);
+
+vscode.postMessage({ type: "ready" });
+
+function safeState(): Draft {
+  const stored = vscode.getState<Partial<Draft>>();
+  return { text: stored?.text ?? "", attachments: stored?.attachments ?? [] };
+}
+
+function saveDraft(): void {
+  // Pasted images would bloat the saved state; they stay in memory only.
+  vscode.setState<Draft>({
+    text: composer.value,
+    attachments: attachments.filter((item) => item.kind !== "image"),
+  });
+}
+
+function handleMessage(message: HostMessage): void {
   switch (message.type) {
     case "state":
       Object.assign(state, message.state);
-      entryNodes.clear();
-      render();
-      break;
-    case "entries":
-      state.entries = message.entries;
-      entryNodes.clear();
-      renderTranscript();
+      renderAll();
       break;
     case "entryUpsert":
       upsertEntry(message.entry);
       break;
+    case "entryRemove":
+      removeEntry(message.id);
+      break;
     case "header":
       state.header = message.header;
       renderHeader();
+      renderGate();
+      renderToolbar();
+      renderEmpty();
       break;
     case "plan":
       state.plan = message.plan;
@@ -85,21 +204,29 @@ window.addEventListener("message", (event: MessageEvent<HostMessage>) => {
       break;
     case "tokenUsage":
       state.tokenUsage = message.usage;
-      renderUsage();
+      renderToolbar();
       break;
     case "turnActive":
-      state.turnActive = message.active;
-      renderComposerState();
+      setTurnActive(message.active);
       break;
     case "approvals":
       state.approvals = message.approvals;
       renderApprovals();
       break;
     case "composerInsert":
-      insertIntoComposer(message.text);
+      insertText(message.text);
+      break;
+    case "composerSet":
+      composer.value = message.text;
+      autoGrow();
+      saveDraft();
+      composer.focus();
+      break;
+    case "composerAttach":
+      addAttachment(message.attachment);
       break;
     case "focusComposer":
-      composer()?.focus();
+      composer.focus();
       break;
     case "fileSuggestions":
       if (message.token === String(suggestionToken)) {
