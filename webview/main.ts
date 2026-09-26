@@ -692,174 +692,361 @@ function renderToolbar(): void {
   send.classList.toggle("stop", stop);
   send.disabled = header.connection !== "ready";
 
-    case "permissions":
-      return `
-        <div class="approval" data-approval-id="${escapeHtml(request.id)}" data-approval-kind="permissions">
-          <div class="approval-title">Grant ${escapeHtml(request.summary)}?</div>
-          ${request.reason ? `<div class="approval-reason">${escapeHtml(request.reason)}</div>` : ""}
-          <div class="approval-cwd">in ${escapeHtml(request.cwd)}</div>
-          <div class="approval-actions">
-            <button class="primary" data-decision="accept" type="button">Grant</button>
-            <button data-decision="decline" type="button">Deny</button>
-          </div>
-        </div>
-      `;
+  const mode = MODES.find((item) => item.id === header.mode) ?? MODES[2];
+  const modeButton = document.getElementById("mode-button") as HTMLButtonElement;
+  modeButton.innerHTML = `${mode?.icon ?? ""}<span>${mode?.label ?? ""}</span>`;
+  modeButton.title = mode?.detail ?? "";
+  modeButton.classList.toggle("danger", header.mode === "full");
+  modeButton.disabled = !header.workspaceOpen;
 
-    case "userInput":
-      return `
-        <div class="approval" data-approval-id="${escapeHtml(request.id)}" data-approval-kind="userInput">
-          <div class="approval-title">${escapeHtml(request.question)}</div>
-          <div class="approval-actions">
-            ${request.options
+  const model = document.getElementById("model-button") as HTMLButtonElement;
+  const name = header.model ?? header.providerLabel ?? "Model";
+  model.innerHTML = `<span>${escapeHtml(name)}${header.reasoningEffort ? ` · ${escapeHtml(header.reasoningEffort)}` : ""}</span>${icons.chevron}`;
+  model.title = `${header.providerLabel ?? "Default provider"}: change model`;
+
+  const ring = document.getElementById("ring") as HTMLButtonElement;
+  const usage = state.tokenUsage;
+  ring.hidden = !usage || usage.percentUsed === null;
+  if (usage && usage.percentUsed !== null) {
+    const percent = usage.percentUsed;
+    const circumference = 2 * Math.PI * 6;
+    ring.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" class="ring-track"/><circle cx="8" cy="8" r="6" class="ring-fill${percent > 85 ? " high" : ""}" stroke-dasharray="${whole(circumference * 100) / 100}" stroke-dashoffset="${whole(circumference * (1 - percent / 100) * 100) / 100}"/></svg>`;
+    ring.title = `${Math.round(percent)}% of context (${formatTokens(usage.used)} of ${formatTokens(usage.contextWindow ?? 0)}), ${formatTokens(usage.total)} tokens this conversation. Click to compact.`;
+  }
+}
+
+function modeRows(index: number): string {
+  return MODES.map(
+    (mode, position) => `
+      <button class="pop-row${position === index ? " selected" : ""}${mode.id === state.header.mode ? " current" : ""}" type="button" data-mode="${token(mode.id)}">
+        <span class="pop-icon">${mode.icon}</span>
+        <span class="pop-text"><span>${mode.label}</span><small>${mode.detail}</small></span>
+        ${mode.id === state.header.mode ? icons.check : ""}
+      </button>`,
+  ).join("");
+}
+
+function filteredModels(pop: Extract<Popover, { kind: "models" }>) {
+  const filter = pop.filter.trim().toLowerCase();
+  return (pop.catalog?.models ?? []).filter(
+    (model) => !filter || model.id.toLowerCase().includes(filter) || model.label.toLowerCase().includes(filter),
+  );
+}
+
+function modelRows(pop: Extract<Popover, { kind: "models" }>): string {
+  const models = filteredModels(pop);
+  const rows = models
+    .slice(0, 60)
+    .map((model, position) => {
+      const current = model.id === state.header.model;
+      const efforts =
+        current && model.efforts.length > 1
+          ? `<span class="effort-row">${model.efforts
               .map(
-                (option) =>
-                  `<button data-value="${escapeHtml(option.value)}" type="button">${escapeHtml(option.label)}</button>`,
+                (effort) =>
+                  `<span class="effort${effort === state.header.reasoningEffort ? " on" : ""}" role="button" tabindex="0" data-model="${escapeHtml(model.id)}" data-effort="${escapeHtml(effort)}">${escapeHtml(effort)}</span>`,
               )
-              .join("")}
-          </div>
-          ${
-            request.allowFreeform
-              ? `<div class="approval-freeform">
-                   <input type="text" class="approval-input" placeholder="Type an answer…" />
-                   <button class="primary" data-freeform="1" type="button">Reply</button>
-                 </div>`
-              : ""
-          }
-        </div>
-      `;
-  }
+              .join("")}</span>`
+          : "";
+      return `
+        <button class="pop-row${position === pop.index ? " selected" : ""}" type="button" data-model="${escapeHtml(model.id)}">
+          <span class="pop-text"><span>${escapeHtml(model.label)}</span>${model.description ? `<small>${escapeHtml(model.description)}</small>` : ""}${efforts}</span>
+          ${current ? icons.check : ""}
+        </button>`;
+    })
+    .join("");
+
+  const typed = pop.filter.trim();
+  const custom =
+    typed && !models.some((model) => model.id === typed)
+      ? `<button class="pop-row" type="button" data-model="${escapeHtml(typed)}"><span class="pop-text"><span>Use “${escapeHtml(typed)}”</span></span></button>`
+      : "";
+  const body = !pop.catalog
+    ? `<div class="pop-note">Loading models…</div>`
+    : pop.catalog.error
+      ? `<div class="pop-note">${escapeHtml(pop.catalog.error)} Type a model id above, or change the provider.</div>`
+      : rows || (custom ? "" : `<div class="pop-note">No models found.</div>`);
+  return `
+    <input class="pop-search" id="model-filter" type="text" placeholder="Search or type a model id" value="${escapeHtml(pop.filter)}" />
+    <div class="pop-scroll">${body}${custom}</div>
+    <button class="pop-row footer-row" type="button" data-change-provider>
+      <span class="pop-text"><span>${escapeHtml(pop.catalog?.providerLabel ?? "Provider")}</span><small>Change provider</small></span>
+    </button>`;
 }
 
-function renderUsage(): void {
-  const host = document.getElementById("usage");
-  if (!host) {
-    return;
-  }
-  const usage: TokenUsageView | null = state.tokenUsage;
-  if (!usage) {
+function renderPopover(): void {
+  const host = document.getElementById("popover") as HTMLElement;
+  host.hidden = popover === null;
+  if (!popover) {
     host.innerHTML = "";
     return;
   }
-  const percent = usage.percentUsed;
-  host.innerHTML = `
-    <div class="usage-row">
-      <span>${formatTokens(usage.used)} tokens</span>
-      ${
-        percent !== null
-          ? `<span class="usage-bar"><span class="usage-fill${percent > 85 ? " high" : ""}" style="width:${percent.toFixed(1)}%"></span></span>
-             <span>${Math.round(percent)}% of context</span>`
-          : ""
+  switch (popover.kind) {
+    case "modes":
+      host.innerHTML = modeRows(popover.index);
+      break;
+    case "models": {
+      const hadFocus = document.activeElement?.id === "model-filter";
+      host.innerHTML = modelRows(popover);
+      const input = document.getElementById("model-filter") as HTMLInputElement;
+      if (hadFocus || !popover.catalog) {
+        input.focus();
+        input.setSelectionRange(input.value.length, input.value.length);
       }
-    </div>
-  `;
+      break;
+    }
+    case "files":
+      host.innerHTML = popover.items
+        .map(
+          (item, index) => `
+          <button class="pop-row${index === (popover as { index: number }).index ? " selected" : ""}" type="button" data-pick="${whole(index)}">
+            <span class="pop-icon">${item.kind === "folder" ? icons.folder : icons.file}</span>
+            <span class="pop-text"><span>${escapeHtml(item.label)}</span><small>${escapeHtml(item.path)}</small></span>
+          </button>`,
+        )
+        .join("");
+      break;
+    case "slash":
+      host.innerHTML = popover.items
+        .map(
+          (item, index) => `
+          <button class="pop-row${index === (popover as { index: number }).index ? " selected" : ""}" type="button" data-pick="${whole(index)}">
+            <span class="pop-text"><span>/${escapeHtml(item.label)}</span><small>${escapeHtml(item.detail)}</small></span>
+            ${item.kind === "skill" ? '<span class="pop-tag">skill</span>' : ""}
+          </button>`,
+        )
+        .join("");
+      break;
+  }
+  host.querySelector(".selected")?.scrollIntoView({ block: "nearest" });
 }
 
-function renderComposerState(): void {
-  const send = document.getElementById("send") as HTMLButtonElement | null;
-  const hint = document.getElementById("composer-hint");
-  if (!send || !hint) {
-    return;
+function closePopover(): void {
+  if (popover) {
+    popover = null;
+    renderPopover();
   }
-  if (state.turnActive) {
-    const hasDraft = (composer()?.value.trim().length ?? 0) > 0;
-    send.textContent = hasDraft ? "Steer" : "Stop";
-    send.classList.toggle("stop", !hasDraft);
-    hint.textContent = "Ditfa is working — type to steer it";
-  } else {
-    send.textContent = "Send";
-    send.classList.remove("stop");
-    hint.textContent = "Enter to send · Shift+Enter for a new line";
-  }
-  send.disabled = state.header.connection !== "ready";
 }
 
-function renderAttachments(): void {
-  const host = document.getElementById("attachments");
-  if (!host) {
+function renderHistory(): void {
+  const host = document.getElementById("history") as HTMLElement;
+  host.hidden = !historyOpen;
+  if (!historyOpen) {
     return;
   }
-  host.innerHTML = attachments
+  let list = host.querySelector(".history-list");
+  if (!list) {
+    host.innerHTML = `
+      <div class="history-head">
+        <input class="pop-search" id="history-search" type="text" placeholder="Search conversations" />
+        <button class="tool" type="button" data-close-history title="Close">${icons.close}</button>
+      </div>
+      <div class="history-list"></div>`;
+    list = host.querySelector(".history-list") as HTMLElement;
+    (document.getElementById("history-search") as HTMLInputElement).focus();
+  }
+  if (threads === null) {
+    list.innerHTML = `<div class="pop-note">Loading…</div>`;
+    return;
+  }
+  if (threads.length === 0) {
+    list.innerHTML = `<div class="pop-note">No conversations here yet.</div>`;
+    return;
+  }
+  list.innerHTML = threads
     .map(
-      (path) =>
-        `<span class="mini-chip">@${escapeHtml(path)}<button data-remove-attachment="${escapeHtml(path)}" type="button">×</button></span>`,
+      (thread) => `
+      <div class="history-row${thread.active ? " active" : ""}">
+        <button class="history-open" type="button" data-resume="${escapeHtml(thread.id)}">
+          <span class="history-title" dir="auto">${escapeHtml(thread.title)}</span>
+          <small>${timeAgo(thread.updatedAt)} · ${escapeHtml(thread.provider)}</small>
+        </button>
+        <button class="tool" type="button" data-rename="${escapeHtml(thread.id)}" title="Rename">${icons.pencil}</button>
+        <button class="tool${confirmingDelete === thread.id ? " danger" : ""}" type="button" data-delete="${escapeHtml(thread.id)}" title="${confirmingDelete === thread.id ? "Click again to delete" : "Delete"}">${icons.trash}</button>
+      </div>`,
     )
     .join("");
 }
 
-function renderSuggestions(): void {
-  const host = document.getElementById("suggestions");
-  if (!host) {
-    return;
-  }
-  if (activeSuggestions.length === 0) {
-    host.innerHTML = "";
-    host.classList.remove("visible");
-    return;
-  }
-  host.classList.add("visible");
-  host.innerHTML = activeSuggestions
-    .map(
-      (item, index) =>
-        `<button class="suggestion${index === suggestionIndex ? " selected" : ""}" data-suggestion="${escapeHtml(item.path)}" type="button">
-           <span class="suggestion-label">${escapeHtml(item.label)}</span>
-           <span class="suggestion-path">${escapeHtml(item.path)}</span>
-         </button>`,
-    )
-    .join("");
+function openHistory(): void {
+  historyOpen = true;
+  threads = null;
+  confirmingDelete = null;
+  renderHistory();
+  vscode.postMessage({ type: "listThreads", query: "" });
 }
 
-function wireComposer(): void {
-  const textarea = composer();
-  if (!textarea) {
-    return;
-  }
+function closeHistory(): void {
+  historyOpen = false;
+  (document.getElementById("history") as HTMLElement).innerHTML = "";
+  renderHistory();
+  composer.focus();
+}
 
-  textarea.addEventListener("input", () => {
-    autoGrow(textarea);
-    maybeRequestSuggestions(textarea);
-    if (state.turnActive) {
-      // While a turn runs the button means "stop" only when there is nothing to
-      // steer with, so its label tracks the composer contents.
-      renderComposerState();
-    }
+function wireEvents(): void {
+  composer.addEventListener("input", () => {
+    autoGrow();
+    saveDraft();
+    promptCursor = -1;
+    updateSuggestions();
+    renderToolbar();
   });
 
-  textarea.addEventListener("keydown", (event) => {
-    if (activeSuggestions.length > 0) {
-      if (event.key === "ArrowDown") {
-        event.preventDefault();
-        suggestionIndex = (suggestionIndex + 1) % activeSuggestions.length;
-        renderSuggestions();
-        return;
-      }
-      if (event.key === "ArrowUp") {
-        event.preventDefault();
-        suggestionIndex = (suggestionIndex - 1 + activeSuggestions.length) % activeSuggestions.length;
-        renderSuggestions();
-        return;
-      }
-      if (event.key === "Enter" || event.key === "Tab") {
-        event.preventDefault();
-        const picked = activeSuggestions[suggestionIndex];
-        if (picked) {
-          acceptSuggestion(picked.path);
-        }
-        return;
-      }
-      if (event.key === "Escape") {
-        activeSuggestions = [];
-        renderSuggestions();
-        return;
-      }
-    }
+  composer.addEventListener("keydown", onComposerKey);
+  composer.addEventListener("paste", onPaste);
 
-    if (event.key === "Enter" && !event.shiftKey) {
-      event.preventDefault();
-      submit();
-    }
-  });
+  const box = document.getElementById("composer-box") as HTMLElement;
+  box.addEventListener("dragover", (event) => event.preventDefault());
+  box.addEventListener("drop", onDrop);
 
+  scroll.addEventListener("scroll", updateJump, { passive: true });
   root.addEventListener("click", onClick);
+  root.addEventListener("input", onInput);
+  root.addEventListener("keydown", onRootKey);
+}
+
+function onRootKey(event: KeyboardEvent): void {
+  const target = event.target as HTMLElement;
+  if (event.key === "Escape") {
+    if (historyOpen) {
+      closeHistory();
+    } else if (popover) {
+      closePopover();
+      composer.focus();
+    } else if (state.turnActive) {
+      vscode.postMessage({ type: "interrupt" });
+    }
+    return;
+  }
+  if (target.id === "model-filter" && popover?.kind === "models") {
+    const models = filteredModels(popover);
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      const delta = event.key === "ArrowDown" ? 1 : -1;
+      popover.index = (popover.index + delta + Math.max(models.length, 1)) % Math.max(models.length, 1);
+      renderPopover();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const picked = models[popover.index]?.id ?? popover.filter.trim();
+      if (picked) {
+        chooseModel(picked, null);
+      }
+    }
+  }
+}
+
+function onInput(event: Event): void {
+  const target = event.target as HTMLInputElement;
+  const card = target.closest<HTMLElement>("[data-approval-kind]");
+  if (card && target.matches("input[data-hunk-pick]")) {
+    syncApprovalButtons(card);
+    return;
+  }
+  if (target.id === "model-filter" && popover?.kind === "models") {
+    popover.filter = target.value;
+    popover.index = 0;
+    renderPopover();
+    target.focus();
+  } else if (target.id === "history-search") {
+    window.clearTimeout(historySearchTimer);
+    historySearchTimer = window.setTimeout(() => {
+      vscode.postMessage({ type: "listThreads", query: target.value });
+    }, 200);
+  }
+}
+
+function onComposerKey(event: KeyboardEvent): void {
+  if (popover && (popover.kind === "files" || popover.kind === "slash")) {
+    const count = popover.items.length;
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      event.preventDefault();
+      popover.index = (popover.index + (event.key === "ArrowDown" ? 1 : -1) + count) % count;
+      renderPopover();
+      return;
+    }
+    if ((event.key === "Enter" && !event.isComposing) || event.key === "Tab") {
+      event.preventDefault();
+      pickSuggestion(popover.index);
+      return;
+    }
+  }
+
+  if (event.key === "ArrowUp" && composer.value.length === 0 && !event.shiftKey) {
+    recallPrompt(1);
+    event.preventDefault();
+    return;
+  }
+  if (event.key === "ArrowDown" && promptCursor >= 0) {
+    recallPrompt(-1);
+    event.preventDefault();
+    return;
+  }
+
+  // During IME composition Enter confirms the candidate; it must not send.
+  if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+    event.preventDefault();
+    submit();
+  }
+}
+
+function recallPrompt(direction: number): void {
+  const prompts = state.entries.flatMap((entry) => (entry.kind === "user" ? [entry.text] : [])).reverse();
+  const next = promptCursor + direction;
+  if (next >= prompts.length) {
+    return;
+  }
+  promptCursor = next;
+  composer.value = next < 0 ? "" : (prompts[next] ?? "");
+  autoGrow();
+}
+
+function onPaste(event: ClipboardEvent): void {
+  for (const item of event.clipboardData?.items ?? []) {
+    if (item.type.startsWith("image/")) {
+      const file = item.getAsFile();
+      if (file && file.size <= IMAGE_LIMIT_BYTES) {
+        event.preventDefault();
+        attachImage(file);
+      }
+    }
+  }
+}
+
+function onDrop(event: DragEvent): void {
+  event.preventDefault();
+  const list = event.dataTransfer?.getData("text/uri-list") ?? "";
+  for (const line of list.split(/\r?\n/)) {
+    if (line.startsWith("file://")) {
+      const path = decodeURIComponent(line.replace(/^file:\/\//, ""));
+      addAttachment({ kind: "file", path, label: path.split("/").pop() ?? path });
+    }
+  }
+  for (const file of event.dataTransfer?.files ?? []) {
+    if (file.type.startsWith("image/") && file.size <= IMAGE_LIMIT_BYTES) {
+      attachImage(file);
+    }
+  }
+}
+
+function attachImage(file: File): void {
+  const reader = new FileReader();
+  reader.onload = () => {
+    addAttachment({
+      kind: "image",
+      path: file.name || "image",
+      label: file.name || "Pasted image",
+      dataUrl: String(reader.result),
+    });
+  };
+  reader.readAsDataURL(file);
+}
+
+function addAttachment(attachment: ContextAttachment): void {
+  if (!attachments.some((item) => item.path === attachment.path && item.label === attachment.label)) {
+    attachments.push(attachment);
+    renderAttachments();
+    saveDraft();
+  }
 }
 
 function onClick(event: MouseEvent): void {
@@ -867,18 +1054,222 @@ function onClick(event: MouseEvent): void {
   if (!target) {
     return;
   }
+  const hit = (selector: string) => target.closest<HTMLElement>(selector);
 
-  const action = target.closest("[data-action]")?.getAttribute("data-action");
-  if (action) {
-    handleAction(action);
+  if (!hit("#popover") && !hit("#mode-button") && !hit("#model-button") && !hit("#attach")) {
+    closePopover();
+  }
+
+  const fileLink = hit("[data-open-file]");
+  if (fileLink) {
+    event.preventDefault();
+    const line = fileLink.dataset.line;
+    vscode.postMessage({
+      type: "openFile",
+      path: fileLink.dataset.openFile ?? "",
+      ...(line ? { line: Number(line) } : {}),
+    });
+    return;
+  }
+  const link = hit("a[href]");
+  if (link) {
+    event.preventDefault();
+    vscode.postMessage({ type: "openExternal", url: link.getAttribute("href") ?? "" });
     return;
   }
 
-  const send = target.closest("#send");
-  if (send) {
+  if (hit("#send")) {
     submit();
+  } else if (hit("#attach")) {
+    insertText("@", true);
+    updateSuggestions();
+  } else if (hit("#mode-button")) {
+    popover = popover?.kind === "modes" ? null : { kind: "modes", index: MODES.findIndex((mode) => mode.id === state.header.mode) };
+    renderPopover();
+  } else if (hit("#model-button")) {
+    if (popover?.kind === "models") {
+      closePopover();
+    } else {
+      popover = { kind: "models", catalog: null, index: 0, filter: "" };
+      renderPopover();
+      vscode.postMessage({ type: "requestModels" });
+    }
+  } else if (hit("#ring")) {
+    vscode.postMessage({ type: "slashCommand", id: "compact" });
+  } else if (hit("#jump")) {
+    scrollToBottom();
+    updateJump();
+  } else if (hit("[data-open-history]")) {
+    openHistory();
+  } else if (hit("[data-close-history]")) {
+    closeHistory();
+  } else if (hit("[data-new-thread]")) {
+    vscode.postMessage({ type: "newThread" });
+  } else if (hit("[data-install]")) {
+    vscode.postMessage({ type: "installEngine" });
+  } else if (hit("[data-locate]")) {
+    vscode.postMessage({ type: "locateBinary" });
+  } else if (hit("[data-retry]")) {
+    vscode.postMessage({ type: "retryConnection" });
+  } else if (hit("[data-doctor]")) {
+    vscode.postMessage({ type: "runDoctor" });
+  } else if (hit("[data-logs]")) {
+    vscode.postMessage({ type: "showLogs" });
+  } else if (hit("[data-open-folder]")) {
+    vscode.postMessage({ type: "openFolder" });
+  } else if (hit("[data-remove-skill]")) {
+    pendingSkill = null;
+    renderAttachments();
+  } else if (hit("[data-toggle-plan]")) {
+    planOpen = !planOpen;
+    renderPlan();
+  } else if (hit("[data-toggle-active]")) {
+    includeActiveFile = !includeActiveFile;
+    renderAttachments();
+  } else if (hit("[data-change-provider]")) {
+    closePopover();
+    vscode.postMessage({ type: "selectProvider" });
+  } else {
+    onDataClick(target, hit);
+  }
+}
+
+function onDataClick(target: HTMLElement, hit: (selector: string) => HTMLElement | null): void {
+  const setup = hit("[data-setup]")?.dataset.setup;
+  const mode = hit("[data-mode]")?.dataset.mode as AgentMode | undefined;
+  const effort = hit("[data-effort]");
+  const model = hit("[data-model]")?.dataset.model;
+  const pick = hit("[data-pick]")?.dataset.pick;
+  const starter = hit("[data-starter]")?.dataset.starter;
+  const toggle = hit("[data-toggle]")?.dataset.toggle;
+  const copyIndex = hit("[data-copy-index]")?.dataset.copyIndex;
+  const diffRow = hit("[data-diff-path]");
+  const restore = hit("[data-restore]")?.dataset.restore;
+  const review = hit("[data-review]")?.dataset.review;
+  const errorAction = hit("[data-error-action]")?.dataset.errorAction;
+  const removeAttachment = hit("[data-remove-attachment]")?.dataset.removeAttachment;
+  const resume = hit("[data-resume]")?.dataset.resume;
+  const rename = hit("[data-rename]")?.dataset.rename;
+  const remove = hit("[data-delete]")?.dataset.delete;
+  const approval = hit("[data-approval-id]");
+  const reviewToggle = hit("[data-review-toggle]");
+  const revertHunk = hit("[data-revert-hunk]");
+  const undoFile = hit("[data-undo-file]");
+
+  if (reviewToggle) {
+    const key = reviewToggle.dataset.reviewToggle ?? "";
+    if (expanded.has(key)) {
+      expanded.delete(key);
+    } else {
+      expanded.add(key);
+    }
+    rerenderEntry(reviewToggle.dataset.reviewEntry ?? "");
+  } else if (revertHunk) {
+    vscode.postMessage({
+      type: "revertHunks",
+      entryId: revertHunk.dataset.reviewEntry ?? "",
+      path: revertHunk.dataset.reviewPath ?? "",
+      hunks: [Number(revertHunk.dataset.revertHunk)],
+    });
+  } else if (undoFile) {
+    vscode.postMessage({
+      type: "undoFile",
+      entryId: undoFile.dataset.reviewEntry ?? "",
+      path: undoFile.dataset.reviewPath ?? "",
+    });
+  } else if (setup) {
+    vscode.postMessage({ type: "setupProvider", id: setup });
+  } else if (mode) {
+    closePopover();
+    vscode.postMessage({ type: "setMode", mode });
+  } else if (effort) {
+    chooseModel(effort.dataset.model ?? "", effort.dataset.effort ?? null);
+  } else if (model) {
+    chooseModel(model, null);
+  } else if (pick !== undefined) {
+    pickSuggestion(Number(pick));
+  } else if (starter) {
+    composer.value = starter;
+    submit();
+  } else if (toggle) {
+    if (expanded.has(toggle)) {
+      expanded.delete(toggle);
+    } else {
+      expanded.add(toggle);
+    }
+    rerenderEntry(toggle);
+  } else if (copyIndex !== undefined) {
+    const entryId = hit("[data-entry-id]")?.dataset.entryId;
+    const code = entryId ? codeBlocks.get(entryId)?.[Number(copyIndex)] : undefined;
+    const button = target.closest("button");
+    if (code !== undefined && button) {
+      vscode.postMessage({ type: "copy", text: code });
+      button.textContent = "Copied";
+      window.setTimeout(() => {
+        button.textContent = "Copy";
+      }, 1200);
+    }
+  } else if (diffRow) {
+    vscode.postMessage({
+      type: "openDiff",
+      entryId: diffRow.dataset.diffEntry ?? "",
+      path: diffRow.dataset.diffPath ?? "",
+    });
+  } else if (restore) {
+    vscode.postMessage({ type: "restoreCheckpoint", turnId: restore });
+  } else if (review) {
+    vscode.postMessage({ type: "reviewTurn", turnId: review });
+  } else if (errorAction) {
+    vscode.postMessage({ type: "errorAction", action: errorAction as "retry" });
+  } else if (removeAttachment !== undefined) {
+    attachments.splice(Number(removeAttachment), 1);
+    renderAttachments();
+    saveDraft();
+  } else if (resume) {
+    vscode.postMessage({ type: "resumeThread", threadId: resume });
+    closeHistory();
+  } else if (rename) {
+    startRename(rename);
+  } else if (remove) {
+    if (confirmingDelete === remove) {
+      confirmingDelete = null;
+      vscode.postMessage({ type: "deleteThread", threadId: remove });
+    } else {
+      confirmingDelete = remove;
+      renderHistory();
+    }
+  } else if (approval) {
+    handleApprovalClick(approval, target);
+  }
+}
+
+function startRename(threadId: string): void {
+  const row = document.querySelector(`[data-resume="${CSS.escape(threadId)}"]`);
+  const thread = threads?.find((item) => item.id === threadId);
+  if (!row || !thread) {
     return;
   }
+  const input = document.createElement("input");
+  input.className = "pop-search";
+  input.value = thread.title;
+  row.replaceWith(input);
+  input.focus();
+  input.select();
+  const commit = () => {
+    const title = input.value.trim();
+    if (title && title !== thread.title) {
+      thread.title = title;
+      vscode.postMessage({ type: "renameThread", threadId, title });
+    }
+    renderHistory();
+  };
+  input.addEventListener("blur", commit, { once: true });
+  input.addEventListener("keydown", (event) => {
+    if (event.key === "Enter") {
+      input.blur();
+    }
+  });
+}
 
   const toggle = target.closest("[data-toggle]")?.getAttribute("data-toggle");
   if (toggle) {

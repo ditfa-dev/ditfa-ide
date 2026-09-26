@@ -1,9 +1,23 @@
 import { randomBytes } from "node:crypto";
+import { isAbsolute } from "node:path";
 import * as vscode from "vscode";
 
 import type { DitfaController } from "../controller";
-import type { HostMessage, WebviewMessage } from "../session/types";
+import type {
+  ChatEntry,
+  ContextAttachment,
+  HostMessage,
+  WebviewMessage,
+} from "../session/types";
 import type { Logger } from "../util/logger";
+import { resolveWorkspaceRoot } from "../util/settings";
+
+/**
+ * Longest a streamed update waits before reaching the webview. Deltas arrive far
+ * faster than anyone can read, and posting each one is what makes chat panels
+ * lag: updates to one entry are merged and sent at most this often.
+ */
+const FLUSH_MS = 40;
 
 /**
  * The chat sidebar.
@@ -18,6 +32,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   private view: vscode.WebviewView | undefined;
   private readonly subscriptions: vscode.Disposable[] = [];
+  private readonly pendingEntries = new Map<string, ChatEntry>();
+  private flushTimer: NodeJS.Timeout | undefined;
+  /** Messages for a composer that does not exist yet, sent once the view says it is ready. */
+  private queued: HostMessage[] = [];
+  private viewReady = false;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -26,13 +45,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   ) {
     this.subscriptions.push(
       controller.onDidResetState(() => this.post({ type: "state", state: controller.snapshot() })),
-      controller.onDidUpsertEntry((entry) => this.post({ type: "entryUpsert", entry })),
+      controller.onDidUpsertEntry((entry) => this.queueEntry(entry)),
+      controller.onDidRemoveEntry((id) => this.post({ type: "entryRemove", id })),
+      controller.onDidSetComposer((text) => this.post({ type: "composerSet", text })),
+      controller.onDidChangeActiveEditor((editor) => this.post({ type: "activeEditor", editor })),
       controller.onDidPatchState((patch) => {
         if (patch.header) {
           this.post({ type: "header", header: patch.header });
-        }
-        if (patch.entries) {
-          this.post({ type: "entries", entries: patch.entries });
         }
         if (patch.plan) {
           this.post({ type: "plan", plan: patch.plan, explanation: patch.planExplanation ?? null });
@@ -52,6 +71,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
   resolveWebviewView(view: vscode.WebviewView): void {
     this.view = view;
+    this.viewReady = false;
 
     view.webview.options = {
       enableScripts: true,
@@ -60,11 +80,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     view.webview.html = this.buildHtml(view.webview);
 
     view.webview.onDidReceiveMessage((message: WebviewMessage) => {
-      void this.handleMessage(message);
+      this.handleMessage(message).catch((error: unknown) => {
+        this.logger.error(`webview message ${message.type} failed`, error);
+        void vscode.window.showErrorMessage(
+          `Ditfa: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      });
     });
 
     view.onDidDispose(() => {
       this.view = undefined;
+      this.viewReady = false;
     });
   }
 
@@ -76,11 +102,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     }
   }
 
-  /** Appends text to the composer, revealing the panel first. */
+  /** Attaches context to the composer, revealing the panel first. */
+  attachToComposer(attachment: ContextAttachment): void {
+    this.reveal();
+    this.deliver({ type: "composerAttach", attachment });
+    this.deliver({ type: "focusComposer" });
+  }
+
   insertIntoComposer(text: string): void {
     this.reveal();
-    this.post({ type: "composerInsert", text });
-    this.post({ type: "focusComposer" });
+    this.deliver({ type: "composerInsert", text });
+    this.deliver({ type: "focusComposer" });
   }
 
   dispose(): void {
