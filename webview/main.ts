@@ -230,409 +230,467 @@ function handleMessage(message: HostMessage): void {
       break;
     case "fileSuggestions":
       if (message.token === String(suggestionToken)) {
-        activeSuggestions = message.results;
-        suggestionIndex = 0;
-        renderSuggestions();
+        popover = message.results.length > 0 ? { kind: "files", items: message.results, index: 0 } : null;
+        renderPopover();
       }
       break;
+    case "threads":
+      threads = message.threads;
+      renderHistory();
+      break;
+    case "models":
+      if (popover?.kind === "models") {
+        popover.catalog = message.catalog;
+        renderPopover();
+      }
+      break;
+    case "setupOptions":
+      setupOptions = message.options;
+      lastGate = "";
+      renderGate();
+      break;
+    case "slashCommands":
+      slashCommands = message.commands;
+      break;
+    case "activeEditor":
+      activeEditor = message.editor;
+      renderAttachments();
+      break;
   }
-});
+}
 
-vscode.postMessage({ type: "ready" });
-
-function render(): void {
-  root.innerHTML = `
-    <div class="header" id="header"></div>
-    <div class="scroll" id="scroll">
-      <div class="plan" id="plan"></div>
-      <div class="transcript" id="transcript"></div>
-      <div class="approvals" id="approvals"></div>
-    </div>
-    <div class="footer">
-      <div class="usage" id="usage"></div>
-      <div class="composer">
-        <div class="attachments" id="attachments"></div>
-        <div class="suggestions" id="suggestions"></div>
-        <textarea id="composer" rows="1" placeholder="Ask Ditfa to build, explain, or fix something.  Use @ to attach a file."></textarea>
-        <div class="composer-actions">
-          <div class="composer-hint" id="composer-hint"></div>
-          <button id="send" class="primary" type="button">Send</button>
-        </div>
-      </div>
-    </div>
-  `;
-
-  wireComposer();
+function renderAll(): void {
   renderHeader();
-  renderPlan();
+  renderGate();
   renderTranscript();
+  renderPlan();
   renderApprovals();
-  renderUsage();
-  renderComposerState();
+  renderAttachments();
+  renderToolbar();
+  renderChanges();
+  renderWorking();
 }
 
 function renderHeader(): void {
-  const host = document.getElementById("header");
-  if (!host) {
-    return;
-  }
-  const header = state.header;
-
-  if (header.connection === "unavailable") {
-    host.className = "header header-error";
-    host.innerHTML = `
-      <div class="header-error-body">
-        <span class="codicon-warning">⚠</span>
-        <span>${escapeHtml(header.connectionError ?? "Ditfa is not connected.")}</span>
-      </div>
-      <div class="header-error-actions">
-        <button data-action="retryConnection" type="button">Retry</button>
-        <button data-action="showLogs" type="button">Logs</button>
-      </div>
-    `;
-    return;
-  }
-
-  host.className = "header";
-  const modelLabel = header.model ?? "default model";
-  const effort = header.reasoningEffort ? ` · ${header.reasoningEffort}` : "";
-  const account = header.accountLabel
-    ? `${header.accountLabel}${header.planLabel ? ` · ${header.planLabel}` : ""}`
-    : "Not signed in";
-
+  const host = document.getElementById("topbar") as HTMLElement;
+  const title = state.header.threadName ?? firstUserText() ?? "New conversation";
   host.innerHTML = `
-    <button class="chip" data-action="selectModel" type="button" title="Change provider or model">
-      <span class="chip-icon">◆</span>
-      <span>${escapeHtml(header.provider ? `${header.provider}/${modelLabel}` : modelLabel)}${escapeHtml(effort)}</span>
+    <span class="topbar-mark">${markSvg(state.turnActive ? "ripple" : "none")}</span>
+    <button class="thread-title" type="button" data-open-history title="Conversations">
+      <span>${escapeHtml(title)}</span>${icons.chevron}
     </button>
-    <button class="chip" data-action="selectApprovalMode" type="button" title="Change approval mode">
-      <span class="chip-icon">${header.sandboxMode === "danger-full-access" ? "⚠" : "🛡"}</span>
-      <span>${escapeHtml(approvalLabel(header))}</span>
-    </button>
-    <button class="chip chip-right" data-action="${header.accountLabel ? "showAccount" : "signIn"}" type="button" title="Ditfa account and usage">
-      <span class="chip-icon">◐</span>
-      <span>${escapeHtml(account)}</span>
-      ${header.usagePercent !== null ? `<span class="chip-usage">${Math.round(header.usagePercent)}%</span>` : ""}
-    </button>
+    <button class="tool" type="button" data-new-thread title="New conversation">${icons.plus}</button>
+    <button class="tool" type="button" data-open-history title="Conversations">${icons.history}</button>
   `;
 }
 
-function approvalLabel(header: SessionHeader): string {
-  if (header.sandboxMode === "danger-full-access") {
-    return "Full access";
-  }
-  if (header.sandboxMode === "read-only") {
-    return "Read only";
-  }
-  return header.approvalPolicy === "never" ? "Auto" : "Ask on request";
+function firstUserText(): string | null {
+  const first = state.entries.find((entry) => entry.kind === "user");
+  return first?.kind === "user" ? first.text.split("\n")[0]?.slice(0, 60) ?? null : null;
 }
 
-function renderPlan(): void {
-  const host = document.getElementById("plan");
-  if (!host) {
+/** Everything that stands between the user and a working chat. */
+function renderGate(): void {
+  const host = document.getElementById("gate") as HTMLElement;
+  const { connection, connectionError, install, needsSetup } = state.header;
+  const key = `${connection}|${connectionError ?? ""}|${needsSetup}|${install?.stage ?? ""}`;
+
+  const show = connection !== "ready" || needsSetup;
+  host.hidden = !show;
+  document.getElementById("footer")?.classList.toggle("gated", show);
+  if (!show) {
+    lastGate = "";
     return;
   }
-  if (state.plan.length === 0) {
-    host.innerHTML = "";
-    host.classList.remove("visible");
+
+  if (key === lastGate && install) {
+    // Keep the mark's animation and only move the bar.
+    const bar = host.querySelector<HTMLElement>(".progress-fill");
+    if (bar) {
+      bar.style.width = `${whole(install.percent, 100)}%`;
+    }
+    const label = host.querySelector(".progress-label");
+    if (label) {
+      label.textContent = installLabel();
+    }
     return;
   }
-  host.classList.add("visible");
-  const done = state.plan.filter((step) => step.status === "completed").length;
-  host.innerHTML = `
-    <div class="plan-head">
-      <span>Plan</span>
-      <span class="plan-count">${done}/${state.plan.length}</span>
-    </div>
-    <ul class="plan-list">
-      ${state.plan.map(renderPlanStep).join("")}
-    </ul>
-    ${state.planExplanation ? `<div class="plan-note">${escapeHtml(state.planExplanation)}</div>` : ""}
+  if (key === lastGate) {
+    return;
+  }
+  lastGate = key;
+
+  const lines = `<div class="moving-lines" aria-hidden="true">${"<span></span>".repeat(9)}</div>`;
+  switch (connection) {
+    case "starting":
+      host.innerHTML = `${lines}<div class="gate-body">${markSvg("assemble", "gate-mark")}<p class="gate-note">Starting the engine…</p></div>`;
+      break;
+    case "missingBinary":
+      host.innerHTML = `${lines}<div class="gate-body">
+        ${markSvg("assemble", "gate-mark")}
+        <h1>One step to go</h1>
+        <p>Ditfa Code runs on a small engine on this machine. It is downloaded once from GitHub and checked against its published checksum.</p>
+        <button class="primary large" type="button" data-install>Install the engine</button>
+        <button class="link" type="button" data-locate>I already have ditfa installed</button>
+      </div>`;
+      break;
+    case "installing":
+      host.innerHTML = `${lines}<div class="gate-body">
+        ${markSvg("ripple", "gate-mark")}
+        <h1>Setting up</h1>
+        <div class="progress"><div class="progress-fill" style="width:${whole(install?.percent, 100)}%"></div></div>
+        <p class="progress-label">${installLabel()}</p>
+      </div>`;
+      break;
+    case "unavailable":
+      host.innerHTML = `${lines}<div class="gate-body">
+        ${markSvg("none", "gate-mark")}
+        <h1>The engine could not start</h1>
+        <pre class="gate-error">${escapeHtml(connectionError ?? "Unknown error")}</pre>
+        <button class="primary large" type="button" data-retry>Try again</button>
+        <button class="link" type="button" data-doctor>Run diagnostics</button>
+        <button class="link" type="button" data-logs>Show logs</button>
+      </div>`;
+      break;
+    case "ready":
+      host.innerHTML = `${lines}<div class="gate-body setup">${markSvg("assemble", "gate-mark")}
+        <h1>Connect a model</h1>
+        <p>Pick how Ditfa reaches a model. You can change this at any time.</p>
+        ${renderSetupOptions()}
+      </div>`;
+      break;
+  }
+}
+
+function renderSetupOptions(): string {
+  if (setupOptions.length === 0) {
+    return `<p class="gate-note">Looking for what is available…</p>`;
+  }
+  const row = (option: SetupOption) => `
+    <button class="setup-row" type="button" data-setup="${escapeHtml(option.id)}">
+      <span class="setup-icon">${option.kind === "local" ? icons.cpu : icons.key}</span>
+      <span class="setup-text"><span>${escapeHtml(option.label)}</span><small>${escapeHtml(option.detail)}</small></span>
+      ${option.ready ? '<span class="status-dot"></span>' : ""}
+    </button>`;
+  const account = setupOptions.find((option) => option.kind === "account");
+  const keys = setupOptions.filter((option) => option.kind === "apiKey");
+  const local = setupOptions.filter((option) => option.kind === "local");
+  return `
+    ${account ? `<button class="primary large" type="button" data-setup="${escapeHtml(account.id)}">${escapeHtml(account.label)}</button><p class="gate-note">${escapeHtml(account.detail)}</p>` : ""}
+    <h2>Your own API key</h2><div class="setup-list">${keys.map(row).join("")}</div>
+    <h2>On this machine</h2><div class="setup-list">${local.map(row).join("")}</div>
   `;
 }
 
-function renderPlanStep(step: PlanStep): string {
-  const marker = step.status === "completed" ? "✓" : step.status === "in_progress" ? "◐" : "○";
-  return `<li class="plan-step plan-${step.status}"><span class="plan-marker">${marker}</span>${escapeHtml(step.step)}</li>`;
+function installLabel(): string {
+  const install = state.header.install;
+  switch (install?.stage) {
+    case "verify":
+      return "Checking the download";
+    case "unpack":
+      return "Unpacking";
+    default:
+      return install?.percent !== null && install?.percent !== undefined
+        ? `Downloading ${whole(install.percent)}%`
+        : "Downloading";
+  }
+}
+
+function renderContext(): RenderContext {
+  return {
+    expanded,
+    showReasoning: state.showReasoning,
+    codeBlocks,
+    turnActive: state.turnActive,
+  };
 }
 
 function renderTranscript(): void {
-  const host = document.getElementById("transcript");
-  if (!host) {
-    return;
-  }
-  host.innerHTML = "";
+  transcript.innerHTML = "";
   entryNodes.clear();
-  if (state.entries.length === 0) {
-    host.innerHTML = emptyStateHtml();
-    return;
-  }
+  entriesById.clear();
   for (const entry of state.entries) {
+    entriesById.set(entry.id, entry);
     const node = buildEntry(entry);
     if (node) {
       entryNodes.set(entry.id, node);
-      host.appendChild(node);
+      transcript.appendChild(node);
     }
   }
+  renderEmpty();
   scrollToBottom();
 }
 
-function emptyStateHtml(): string {
-  return `
-    <div class="empty">
-      <div class="empty-title">Ditfa Code</div>
-      <p>A multi-provider coding agent that reads, writes, and runs code in this workspace.</p>
-      <ul class="empty-hints">
-        <li><kbd>@</kbd> attaches a file from the workspace</li>
-        <li>Select code in the editor, then <em>Add Selection to Chat</em></li>
-        <li>Every command and file edit is shown before it is applied</li>
-      </ul>
+/** The welcome screen lives inside the transcript and only exists while it is empty. */
+function renderEmpty(): void {
+  const existing = transcript.querySelector(".empty");
+  if (state.entries.length > 0) {
+    existing?.remove();
+    return;
+  }
+  if (existing) {
+    existing.toggleAttribute("data-no-folder", !state.header.workspaceOpen);
+    return;
+  }
+  const node = document.createElement("div");
+  node.className = "empty";
+  node.toggleAttribute("data-no-folder", !state.header.workspaceOpen);
+  node.innerHTML = `
+    <div class="moving-lines" aria-hidden="true">${"<span></span>".repeat(9)}</div>
+    ${markSvg("assemble", "empty-mark")}
+    <h1>What are we building?</h1>
+    <div class="starters">
+      ${STARTERS.map((text) => `<button type="button" data-starter="${escapeHtml(text)}">${escapeHtml(text)}</button>`).join("")}
     </div>
+    <p class="no-folder-note">No folder is open, so Ditfa can read but not change anything.
+      <button class="link" type="button" data-open-folder>Open a folder</button></p>
+    <p class="empty-hints"><kbd>@</kbd> files &nbsp;·&nbsp; <kbd>/</kbd> commands and skills</p>
   `;
-}
-
-function upsertEntry(entry: ChatEntry): void {
-  const index = state.entries.findIndex((existing) => existing.id === entry.id);
-  if (index === -1) {
-    state.entries.push(entry);
-  } else {
-    state.entries[index] = entry;
-  }
-
-  const host = document.getElementById("transcript");
-  if (!host) {
-    return;
-  }
-  if (host.querySelector(".empty")) {
-    host.innerHTML = "";
-  }
-
-  const atBottom = isNearBottom();
-  const fresh = buildEntry(entry);
-  const existingNode = entryNodes.get(entry.id);
-
-  if (!fresh) {
-    if (existingNode) {
-      existingNode.remove();
-      entryNodes.delete(entry.id);
-    }
-    return;
-  }
-
-  if (existingNode) {
-    existingNode.replaceWith(fresh);
-  } else {
-    host.appendChild(fresh);
-  }
-  entryNodes.set(entry.id, fresh);
-
-  if (atBottom) {
-    scrollToBottom();
-  }
+  transcript.appendChild(node);
 }
 
 function buildEntry(entry: ChatEntry): HTMLElement | null {
-  if (entry.kind === "reasoning" && !state.showReasoning) {
+  const html = renderEntry(entry, renderContext());
+  if (html === null) {
     return null;
   }
-
   const node = document.createElement("div");
-  node.className = `entry entry-${entry.kind}`;
+  node.className = `entry entry-${token(entry.kind)}`;
   node.dataset.entryId = entry.id;
-
-  switch (entry.kind) {
-    case "user":
-      node.innerHTML = `
-        <div class="bubble user-bubble">
-          <div class="entry-text">${escapeHtml(entry.text).replace(/\n/g, "<br />")}</div>
-          ${
-            entry.attachments.length > 0
-              ? `<div class="chips">${entry.attachments
-                  .map((path) => `<span class="mini-chip">@${escapeHtml(path)}</span>`)
-                  .join("")}</div>`
-              : ""
-          }
-        </div>
-      `;
-      break;
-
-    case "assistant": {
-      const rendered = renderMarkdown(entry.text);
-      codeBlocksByEntry.set(entry.id, rendered.codeBlocks);
-      node.innerHTML = `
-        <div class="markdown">${rendered.html}</div>
-        ${entry.streaming ? '<div class="cursor"></div>' : ""}
-      `;
-      break;
-    }
-
-    case "reasoning": {
-      const collapsed = collapsedEntries.has(entry.id);
-      node.innerHTML = `
-        <button class="reasoning-toggle" type="button" data-toggle="${escapeHtml(entry.id)}">
-          <span class="caret">${collapsed ? "▸" : "▾"}</span> Thinking${entry.streaming ? "…" : ""}
-        </button>
-        ${collapsed ? "" : `<div class="reasoning-body">${escapeHtml(entry.summary).replace(/\n/g, "<br />")}</div>`}
-      `;
-      break;
-    }
-
-    case "command": {
-      const collapsed = collapsedEntries.has(entry.id);
-      const output = stripAnsi(entry.output);
-      node.innerHTML = `
-        <div class="tool-card status-${entry.status}">
-          <button class="tool-head" type="button" data-toggle="${escapeHtml(entry.id)}">
-            <span class="caret">${collapsed ? "▸" : "▾"}</span>
-            <span class="tool-icon">$</span>
-            <code class="tool-title">${escapeHtml(entry.command)}</code>
-            <span class="tool-status">${commandStatusLabel(entry.status, entry.exitCode, entry.durationMs)}</span>
-          </button>
-          ${
-            collapsed || output.trim() === ""
-              ? ""
-              : `<pre class="tool-output">${escapeHtml(tailLines(output, 400))}</pre>`
-          }
-        </div>
-      `;
-      break;
-    }
-
-    case "fileChange": {
-      const totals = entry.changes.reduce(
-        (acc, change) => ({
-          additions: acc.additions + change.additions,
-          deletions: acc.deletions + change.deletions,
-        }),
-        { additions: 0, deletions: 0 },
-      );
-      node.innerHTML = `
-        <div class="tool-card patch-${entry.status}">
-          <div class="tool-head static">
-            <span class="tool-icon">±</span>
-            <span class="tool-title">${entry.changes.length} file${entry.changes.length === 1 ? "" : "s"} changed</span>
-            <span class="diffstat"><span class="add">+${totals.additions}</span> <span class="del">-${totals.deletions}</span></span>
-            <span class="tool-status">${patchStatusLabel(entry.status)}</span>
-          </div>
-          <div class="file-list">
-            ${entry.changes.map((change) => renderFileRow(entry.id, change)).join("")}
-          </div>
-        </div>
-      `;
-      break;
-    }
-
-    case "toolCall":
-      node.innerHTML = `
-        <div class="tool-card status-${entry.status}">
-          <div class="tool-head static">
-            <span class="tool-icon">⚙</span>
-            <span class="tool-title">${escapeHtml(entry.title)}</span>
-            <span class="tool-status">${entry.status}${entry.durationMs ? ` · ${formatDuration(entry.durationMs)}` : ""}</span>
-          </div>
-          ${entry.detail ? `<pre class="tool-output">${escapeHtml(entry.detail)}</pre>` : ""}
-        </div>
-      `;
-      break;
-
-    case "webSearch":
-      node.innerHTML = `
-        <div class="tool-card">
-          <div class="tool-head static">
-            <span class="tool-icon">⌕</span>
-            <span class="tool-title">Searched the web for “${escapeHtml(entry.query)}”</span>
-          </div>
-        </div>
-      `;
-      break;
-
-    case "notice":
-      node.innerHTML = `<div class="notice notice-${entry.tone}">${escapeHtml(entry.text)}</div>`;
-      break;
-
-    case "error":
-      node.innerHTML = `
-        <div class="error-card">
-          <div class="error-title">${escapeHtml(entry.message)}</div>
-          ${entry.details ? `<pre class="error-details">${escapeHtml(entry.details)}</pre>` : ""}
-          ${entry.retrying ? '<div class="error-retry">Retrying…</div>' : ""}
-        </div>
-      `;
-      break;
-  }
-
+  node.innerHTML = html;
   return node;
 }
 
-function renderFileRow(entryId: string, change: FileChangeSummary): string {
-  const kindMark = change.kind === "add" ? "A" : change.kind === "delete" ? "D" : "M";
-  return `
-    <button class="file-row" type="button" data-diff-entry="${escapeHtml(entryId)}" data-diff-path="${escapeHtml(change.path)}">
-      <span class="file-kind kind-${change.kind}">${kindMark}</span>
-      <span class="file-name">${escapeHtml(change.label)}</span>
-      <span class="file-path">${escapeHtml(change.path)}</span>
-      <span class="diffstat"><span class="add">+${change.additions}</span> <span class="del">-${change.deletions}</span></span>
+function upsertEntry(entry: ChatEntry): void {
+  const known = entriesById.has(entry.id);
+  entriesById.set(entry.id, entry);
+  if (known) {
+    const index = state.entries.findIndex((existing) => existing.id === entry.id);
+    state.entries[index] = entry;
+  } else {
+    state.entries.push(entry);
+    renderEmpty();
+  }
+
+  const stick = isNearBottom();
+  const existingNode = entryNodes.get(entry.id);
+
+  if (existingNode && patchInPlace(existingNode, entry)) {
+    // Patched without replacing the row.
+  } else {
+    const fresh = buildEntry(entry);
+    if (!fresh) {
+      existingNode?.remove();
+      entryNodes.delete(entry.id);
+    } else {
+      if (existingNode) {
+        existingNode.replaceWith(fresh);
+      } else {
+        transcript.appendChild(fresh);
+      }
+      entryNodes.set(entry.id, fresh);
+    }
+  }
+
+  if (entry.kind === "fileChange") {
+    renderChanges();
+  }
+  if (entry.kind === "user" && !known) {
+    renderHeader();
+    scrollToBottom();
+  } else if (stick) {
+    scrollToBottom();
+  }
+  updateJump();
+}
+
+/** Updates a streaming row in place, which keeps scroll position and text selection. */
+function patchInPlace(node: HTMLElement, entry: ChatEntry): boolean {
+  if (entry.kind === "assistant") {
+    const body = node.querySelector(".markdown");
+    if (body) {
+      const rendered = renderMarkdown(entry.text);
+      codeBlocks.set(entry.id, rendered.codeBlocks);
+      body.innerHTML = rendered.html;
+      return true;
+    }
+  }
+  if (entry.kind === "command" && entry.status === "running") {
+    const output = node.querySelector<HTMLElement>(".tool-output");
+    const status = node.querySelector(".tool-status");
+    if (output && status) {
+      const pinned = output.scrollHeight - output.scrollTop - output.clientHeight < 24;
+      output.innerHTML = commandOutputHtml(entry);
+      status.textContent = commandStatusLabel(entry);
+      if (pinned) {
+        output.scrollTop = output.scrollHeight;
+      }
+      return true;
+    }
+  }
+  return false;
+}
+
+function removeEntry(id: string): void {
+  entriesById.delete(id);
+  state.entries = state.entries.filter((entry) => entry.id !== id);
+  entryNodes.get(id)?.remove();
+  entryNodes.delete(id);
+  codeBlocks.delete(id);
+}
+
+function rerenderEntry(id: string): void {
+  const entry = entriesById.get(id);
+  const node = entryNodes.get(id);
+  if (entry && node) {
+    const fresh = buildEntry(entry);
+    if (fresh) {
+      node.replaceWith(fresh);
+      entryNodes.set(id, fresh);
+    }
+  }
+}
+
+function setTurnActive(active: boolean): void {
+  if (state.turnActive === active) {
+    return;
+  }
+  state.turnActive = active;
+  turnStartedAt = active ? Date.now() : 0;
+  renderHeader();
+  renderToolbar();
+  renderWorking();
+  renderChanges();
+  // Restore buttons only exist between turns.
+  for (const entry of state.entries) {
+    if (entry.kind === "user") {
+      rerenderEntry(entry.id);
+    }
+  }
+}
+
+function renderWorking(): void {
+  const host = document.getElementById("working") as HTMLElement;
+  window.clearInterval(workingTimer);
+  host.hidden = !state.turnActive;
+  if (!state.turnActive) {
+    host.innerHTML = "";
+    return;
+  }
+  host.innerHTML = `${markSvg("ripple")}<span class="working-text">Working</span><span class="working-time"></span>`;
+  const time = host.querySelector(".working-time") as HTMLElement;
+  const tick = () => {
+    const seconds = Math.floor((Date.now() - (turnStartedAt || Date.now())) / 1000);
+    time.textContent = seconds >= 3 ? `${seconds}s` : "";
+  };
+  tick();
+  workingTimer = window.setInterval(tick, 1000);
+}
+
+function renderPlan(): void {
+  const host = document.getElementById("plan") as HTMLElement;
+  host.hidden = state.plan.length === 0;
+  if (state.plan.length === 0) {
+    host.innerHTML = "";
+    return;
+  }
+  const done = state.plan.filter((step) => step.status === "completed").length;
+  const current = state.plan.find((step) => step.status === "in_progress");
+  host.innerHTML = `
+    <button class="plan-head" type="button" data-toggle-plan aria-expanded="${planOpen}">
+      <span class="caret${planOpen ? " open" : ""}">${icons.caret}</span>
+      <span class="plan-current">${escapeHtml(current?.step ?? "Plan")}</span>
+      <span class="plan-count">${whole(done)}/${whole(state.plan.length)}</span>
     </button>
+    ${
+      planOpen
+        ? `<ul class="plan-list">${state.plan
+            .map(
+              (step) =>
+                `<li class="plan-step plan-${token(step.status)}"><span class="plan-marker">${step.status === "completed" ? icons.check : ""}</span><span dir="auto">${escapeHtml(step.step)}</span></li>`,
+            )
+            .join("")}</ul>${state.planExplanation ? `<div class="plan-note" dir="auto">${escapeHtml(state.planExplanation)}</div>` : ""}`
+        : ""
+    }
+  `;
+}
+
+function latestChanges(): { turnId: string; changes: FileChangeSummary[] } | null {
+  for (let index = state.entries.length - 1; index >= 0; index -= 1) {
+    const entry = state.entries[index];
+    if (entry?.kind === "fileChange" && entry.status === "applied" && entry.turnId) {
+      const turnId = entry.turnId;
+      const changes = state.entries.flatMap((candidate) =>
+        candidate.kind === "fileChange" && candidate.status === "applied" && candidate.turnId === turnId
+          ? candidate.changes
+          : [],
+      );
+      return { turnId, changes };
+    }
+  }
+  return null;
+}
+
+function renderChanges(): void {
+  const host = document.getElementById("changes") as HTMLElement;
+  const latest = state.turnActive ? null : latestChanges();
+  host.hidden = !latest;
+  if (!latest) {
+    host.innerHTML = "";
+    return;
+  }
+  const files = new Set(latest.changes.map((change) => change.path)).size;
+  const totals = sumChanges(latest.changes);
+  host.innerHTML = `
+    <span class="changes-text">${whole(files)} file${files === 1 ? "" : "s"} changed <span class="diffstat">${diffStat(totals.additions, totals.deletions)}</span></span>
+    <button type="button" class="ghost-button" data-review="${escapeHtml(latest.turnId)}">Review</button>
+    <button type="button" class="ghost-button" data-restore="${escapeHtml(latest.turnId)}">Undo</button>
   `;
 }
 
 function renderApprovals(): void {
-  const host = document.getElementById("approvals");
-  if (!host) {
-    return;
-  }
+  const host = document.getElementById("approvals") as HTMLElement;
   host.innerHTML = state.approvals.map(renderApproval).join("");
   if (state.approvals.length > 0) {
     scrollToBottom();
+    // With the composer idle, Enter answers the card.
+    if (document.activeElement !== composer || composer.value.length === 0) {
+      host.querySelector<HTMLButtonElement>("button.primary")?.focus();
+    }
   }
 }
 
-function renderApproval(request: ApprovalRequest): string {
-  switch (request.kind) {
-    case "command":
-      return `
-        <div class="approval" data-approval-id="${escapeHtml(request.id)}" data-approval-kind="command">
-          <div class="approval-title">Run this command?</div>
-          ${request.reason ? `<div class="approval-reason">${escapeHtml(request.reason)}</div>` : ""}
-          <pre class="approval-command">${escapeHtml(request.command)}</pre>
-          ${request.cwd ? `<div class="approval-cwd">in ${escapeHtml(request.cwd)}</div>` : ""}
-          <div class="approval-actions">
-            <button class="primary" data-decision="accept" type="button">Run</button>
-            ${request.canAlwaysAllow ? '<button data-decision="acceptForSession" type="button">Always in this session</button>' : ""}
-            <button data-decision="decline" type="button">Skip</button>
-            <button class="ghost" data-decision="cancel" type="button">Stop</button>
-          </div>
-        </div>
-      `;
+function renderAttachments(): void {
+  const host = document.getElementById("attachments") as HTMLElement;
+  const chips = attachments.map(
+    (item, index) =>
+      `<span class="mini-chip">${item.kind === "image" && item.dataUrl ? `<img src="${escapeHtml(item.dataUrl)}" alt="" />` : icons.file}<span>${escapeHtml(item.label)}</span><button data-remove-attachment="${index}" type="button" title="Remove">${icons.close}</button></span>`,
+  );
+  if (activeEditor) {
+    const selection = activeEditor.selection
+      ? `:${whole(activeEditor.selection.start)}${activeEditor.selection.end !== activeEditor.selection.start ? `-${whole(activeEditor.selection.end)}` : ""}`
+      : "";
+    chips.unshift(
+      `<button class="mini-chip active-file${includeActiveFile ? "" : " off"}" type="button" data-toggle-active title="${includeActiveFile ? "Ditfa can see this file. Click to hide it." : "Click to let Ditfa see this file."}">${icons.eye}<span>${escapeHtml(activeEditor.label)}${selection}</span></button>`,
+    );
+  }
+  if (pendingSkill) {
+    chips.push(
+      `<span class="mini-chip">${icons.bolt}<span>${escapeHtml(pendingSkill.name)}</span><button data-remove-skill type="button" title="Remove">${icons.close}</button></span>`,
+    );
+  }
+  host.innerHTML = chips.join("");
+  host.hidden = chips.length === 0;
+}
 
-    case "fileChange": {
-      const totals = request.changes.reduce(
-        (acc, change) => ({
-          additions: acc.additions + change.additions,
-          deletions: acc.deletions + change.deletions,
-        }),
-        { additions: 0, deletions: 0 },
-      );
-      return `
-        <div class="approval" data-approval-id="${escapeHtml(request.id)}" data-approval-kind="fileChange">
-          <div class="approval-title">Apply these edits?</div>
-          ${request.reason ? `<div class="approval-reason">${escapeHtml(request.reason)}</div>` : ""}
-          <div class="approval-diffstat">
-            ${request.changes.length} file${request.changes.length === 1 ? "" : "s"}
-            <span class="add">+${totals.additions}</span> <span class="del">-${totals.deletions}</span>
-          </div>
-          <div class="file-list">
-            ${request.changes.map((change) => renderFileRow(request.id, change)).join("")}
-          </div>
-          <div class="approval-actions">
-            <button class="primary" data-decision="accept" type="button">Apply</button>
-            <button data-decision="acceptForSession" type="button">Always in this session</button>
-            <button data-decision="decline" type="button">Skip</button>
-            <button class="ghost" data-decision="cancel" type="button">Stop</button>
-          </div>
-        </div>
-      `;
-    }
+function renderToolbar(): void {
+  const header = state.header;
+  const send = document.getElementById("send") as HTMLButtonElement;
+  const stop = state.turnActive && composer.value.trim().length === 0;
+  send.innerHTML = stop ? icons.stop : icons.send;
+  send.title = stop ? "Stop" : state.turnActive ? "Add to the current turn" : "Send";
+  send.classList.toggle("stop", stop);
+  send.disabled = header.connection !== "ready";
 
     case "permissions":
       return `
