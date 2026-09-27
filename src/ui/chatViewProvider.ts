@@ -116,40 +116,93 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   dispose(): void {
+    clearTimeout(this.flushTimer);
     for (const subscription of this.subscriptions) {
       subscription.dispose();
     }
   }
 
+  /** Posts now, or after the view has loaded if it is still opening. */
+  private deliver(message: HostMessage): void {
+    if (this.viewReady) {
+      this.post(message);
+    } else {
+      this.queued.push(message);
+    }
+  }
+
+  private queueEntry(entry: ChatEntry): void {
+    this.pendingEntries.set(entry.id, entry);
+    this.flushTimer ??= setTimeout(() => this.flush(), FLUSH_MS);
+  }
+
+  private flush(): void {
+    clearTimeout(this.flushTimer);
+    this.flushTimer = undefined;
+    for (const entry of this.pendingEntries.values()) {
+      void this.view?.webview.postMessage({ type: "entryUpsert", entry } satisfies HostMessage);
+    }
+    this.pendingEntries.clear();
+  }
+
   private post(message: HostMessage): void {
+    // Anything else must land after the entries that came before it.
+    this.flush();
     void this.view?.webview.postMessage(message);
   }
 
   private async handleMessage(message: WebviewMessage): Promise<void> {
+    const { controller } = this;
     switch (message.type) {
       case "ready":
-        this.post({ type: "state", state: this.controller.snapshot() });
-        await this.controller.connect();
+        this.viewReady = true;
+        this.post({ type: "state", state: controller.snapshot() });
+        this.post({ type: "activeEditor", editor: controller.activeEditor() });
+        for (const queued of this.queued.splice(0)) {
+          this.post(queued);
+        }
+        await controller.connect();
+        this.post({ type: "slashCommands", commands: await controller.slashCommands() });
+        if (controller.snapshot().header.needsSetup) {
+          this.post({ type: "setupOptions", options: await controller.setupOptions() });
+        }
         break;
 
       case "send":
-        await this.controller.send(message.text, message.attachments);
+        await controller.send(message.text, message.attachments, message.skill ?? null, message.includeActiveFile);
         break;
 
       case "interrupt":
-        await this.controller.interrupt();
+        await controller.interrupt();
         break;
 
       case "newThread":
-        await vscode.commands.executeCommand("ditfa.newThread");
+        await controller.newThread();
         break;
 
       case "resumeThread":
-        await vscode.commands.executeCommand("ditfa.resumeThread");
+        await controller.resumeThread(message.threadId);
+        break;
+
+      case "listThreads":
+        this.post({
+          type: "threads",
+          threads: await controller.listThreads(message.query),
+          query: message.query,
+        });
+        break;
+
+      case "renameThread":
+        await controller.renameThread(message.threadId, message.title);
+        break;
+
+      case "deleteThread":
+        await controller.deleteThread(message.threadId);
+        this.post({ type: "threads", threads: await controller.listThreads(""), query: "" });
         break;
 
       case "approval":
-        this.controller.approvalService?.resolve(message.answer);
+        controller.approvalService?.resolve(message.answer);
         break;
 
       case "openDiff":
