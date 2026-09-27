@@ -1271,166 +1271,132 @@ function startRename(threadId: string): void {
   });
 }
 
-  const toggle = target.closest("[data-toggle]")?.getAttribute("data-toggle");
-  if (toggle) {
-    if (collapsedEntries.has(toggle)) {
-      collapsedEntries.delete(toggle);
-    } else {
-      collapsedEntries.add(toggle);
-    }
-    const entry = state.entries.find((candidate) => candidate.id === toggle);
-    if (entry) {
-      upsertEntry(entry);
-    }
+function chooseModel(model: string, effort: string | null): void {
+  const catalog = popover?.kind === "models" ? popover.catalog : null;
+  const choice = catalog?.models.find((item) => item.id === model);
+  vscode.postMessage({ type: "selectModel", model, effort });
+  // Stay open when a model offers effort levels, so the choice is one click away.
+  if (effort === null && choice && choice.efforts.length > 1 && popover?.kind === "models") {
+    state.header.model = model;
+    renderPopover();
     return;
   }
-
-  const copyIndex = target.closest("[data-copy-index]")?.getAttribute("data-copy-index");
-  if (copyIndex !== null && copyIndex !== undefined) {
-    const entryId = target.closest("[data-entry-id]")?.getAttribute("data-entry-id");
-    const blocks = entryId ? codeBlocksByEntry.get(entryId) : undefined;
-    const code = blocks?.[Number(copyIndex)];
-    if (code !== undefined) {
-      vscode.postMessage({ type: "copy", text: code });
-      const button = target.closest("button");
-      if (button) {
-        button.textContent = "Copied";
-        setTimeout(() => {
-          button.textContent = "Copy";
-        }, 1200);
-      }
-    }
-    return;
-  }
-
-  const fileRow = target.closest("[data-diff-path]");
-  if (fileRow) {
-    vscode.postMessage({
-      type: "openDiff",
-      entryId: fileRow.getAttribute("data-diff-entry") ?? "",
-      path: fileRow.getAttribute("data-diff-path") ?? "",
-    });
-    return;
-  }
-
-  const suggestion = target.closest("[data-suggestion]")?.getAttribute("data-suggestion");
-  if (suggestion) {
-    acceptSuggestion(suggestion);
-    return;
-  }
-
-  const removeAttachment = target
-    .closest("[data-remove-attachment]")
-    ?.getAttribute("data-remove-attachment");
-  if (removeAttachment) {
-    attachments = attachments.filter((path) => path !== removeAttachment);
-    renderAttachments();
-    return;
-  }
-
-  const approvalNode = target.closest("[data-approval-id]") as HTMLElement | null;
-  if (approvalNode) {
-    handleApprovalClick(approvalNode, target);
-  }
+  closePopover();
+  composer.focus();
 }
 
-function handleAction(action: string): void {
-  switch (action) {
-    case "selectModel":
-      vscode.postMessage({ type: "selectModel" });
-      break;
-    case "selectApprovalMode":
-      vscode.postMessage({ type: "selectApprovalMode" });
-      break;
-    case "signIn":
-      vscode.postMessage({ type: "signIn" });
-      break;
-    case "showAccount":
-      vscode.postMessage({ type: "showAccount" });
-      break;
-    case "showLogs":
-      vscode.postMessage({ type: "showLogs" });
-      break;
-    case "retryConnection":
-      vscode.postMessage({ type: "retryConnection" });
-      break;
-  }
-}
+function handleApprovalClick(node: HTMLElement, target: HTMLElement): void {
+  const id = node.dataset.approvalId ?? "";
+  const kind = node.dataset.approvalKind ?? "";
+  const answer = (value: ApprovalAnswer) => {
+    vscode.postMessage({ type: "approval", answer: value });
+    node.classList.add("answered");
+  };
 
-function handleApprovalClick(approvalNode: HTMLElement, target: HTMLElement): void {
-  const id = approvalNode.getAttribute("data-approval-id") ?? "";
-  const kind = approvalNode.getAttribute("data-approval-kind") ?? "";
-
-  const decision = target.closest("[data-decision]")?.getAttribute("data-decision");
+  const decision = target.closest<HTMLElement>("[data-decision]")?.dataset.decision;
   if (decision) {
-    if (kind === "command" || kind === "fileChange") {
-      vscode.postMessage({
-        type: "approval",
-        answer: { id, kind, decision: decision as "accept" | "acceptForSession" | "decline" | "cancel" },
-      });
-    } else if (kind === "permissions") {
-      vscode.postMessage({
-        type: "approval",
-        answer: { id, kind: "permissions", decision: decision as "accept" | "decline" },
-      });
+    if (kind === "fileChange") {
+      const skip = unticked(node);
+      answer({ id, kind, decision: decision as "accept", ...(skip.length > 0 ? { skip } : {}) });
+    } else if (kind === "command") {
+      answer({ id, kind, decision: decision as "accept" });
+    } else if (kind === "permissions" || kind === "elicitation") {
+      answer({ id, kind, decision: decision as "accept" });
     }
-    approvalNode.classList.add("answered");
     return;
   }
-
-  const value = target.closest("[data-value]")?.getAttribute("data-value");
-  if (value !== null && value !== undefined) {
-    vscode.postMessage({ type: "approval", answer: { id, kind: "userInput", value } });
-    approvalNode.classList.add("answered");
+  const value = target.closest<HTMLElement>("[data-value]")?.dataset.value;
+  if (value !== undefined) {
+    answer({ id, kind: "userInput", value });
     return;
   }
-
   if (target.closest("[data-freeform]")) {
-    const input = approvalNode.querySelector(".approval-input") as HTMLInputElement | null;
-    vscode.postMessage({
-      type: "approval",
-      answer: { id, kind: "userInput", value: input?.value ?? "" },
-    });
-    approvalNode.classList.add("answered");
+    const input = node.querySelector<HTMLInputElement>(".approval-input");
+    answer({ id, kind: "userInput", value: input?.value ?? "" });
+  }
+}
+
+/** Hunks left unticked on an approval card, grouped by file. */
+function unticked(card: HTMLElement): { path: string; hunks: number[] }[] {
+  const byPath = new Map<string, number[]>();
+  for (const box of card.querySelectorAll<HTMLInputElement>("input[data-hunk-pick]")) {
+    if (!box.checked) {
+      const path = box.dataset.hunkPath ?? "";
+      byPath.set(path, [...(byPath.get(path) ?? []), Number(box.dataset.hunkPick)]);
+    }
+  }
+  return [...byPath].map(([path, hunks]) => ({ path, hunks }));
+}
+
+/** Keeps the Apply button honest about how much of the edit it will keep. */
+function syncApprovalButtons(card: HTMLElement): void {
+  const boxes = [...card.querySelectorAll<HTMLInputElement>("input[data-hunk-pick]")];
+  if (boxes.length === 0) {
+    return;
+  }
+  const kept = boxes.filter((box) => box.checked).length;
+  const apply = card.querySelector<HTMLButtonElement>('button[data-decision="accept"]');
+  if (apply) {
+    apply.textContent = kept === boxes.length ? "Apply" : `Apply ${kept} of ${boxes.length}`;
+    apply.disabled = kept === 0;
   }
 }
 
 function submit(): void {
-  if (state.turnActive) {
-    const textarea = composer();
-    const text = textarea?.value.trim() ?? "";
-    if (text.length === 0) {
-      vscode.postMessage({ type: "interrupt" });
-      return;
-    }
-    // Non-empty text during an active turn steers instead of stopping.
-  }
-
-  const textarea = composer();
-  if (!textarea) {
-    return;
-  }
-  const text = textarea.value.trim();
+  const text = composer.value.trim();
   if (text.length === 0) {
+    if (state.turnActive) {
+      vscode.postMessage({ type: "interrupt" });
+    }
+    return;
+  }
+  if (state.header.connection !== "ready") {
     return;
   }
 
-  vscode.postMessage({ type: "send", text, attachments: [...attachments] });
-  textarea.value = "";
+  const command = /^\/(\S+)$/.exec(text)?.[1];
+  const builtin = slashCommands.find((item) => item.kind === "builtin" && item.label === command);
+  if (builtin) {
+    vscode.postMessage({ type: "slashCommand", id: builtin.id });
+  } else {
+    vscode.postMessage({
+      type: "send",
+      text,
+      attachments: [...attachments],
+      skill: pendingSkill,
+      includeActiveFile,
+    });
+  }
+
+  composer.value = "";
   attachments = [];
-  activeSuggestions = [];
+  pendingSkill = null;
+  promptCursor = -1;
+  closePopover();
   renderAttachments();
-  renderSuggestions();
-  autoGrow(textarea);
+  autoGrow();
+  saveDraft();
+  renderToolbar();
 }
 
-function maybeRequestSuggestions(textarea: HTMLTextAreaElement): void {
-  const upToCursor = textarea.value.slice(0, textarea.selectionStart);
-  const match = /@([^\s@]*)$/.exec(upToCursor);
-  if (!match) {
-    if (activeSuggestions.length > 0) {
-      activeSuggestions = [];
-      renderSuggestions();
+function updateSuggestions(): void {
+  const upToCursor = composer.value.slice(0, composer.selectionStart);
+
+  const slash = /^\/([^\s]*)$/.exec(upToCursor);
+  if (slash) {
+    const query = (slash[1] ?? "").toLowerCase();
+    const items = slashCommands
+      .filter((item) => item.label.toLowerCase().includes(query))
+      .slice(0, 12);
+    popover = items.length > 0 ? { kind: "slash", items, index: 0 } : null;
+    renderPopover();
+    return;
+  }
+
+  const mention = /(?:^|\s)@([^\s@]*)$/.exec(upToCursor);
+  if (!mention) {
+    if (popover?.kind === "files" || popover?.kind === "slash") {
+      closePopover();
     }
     return;
   }
@@ -1438,129 +1404,68 @@ function maybeRequestSuggestions(textarea: HTMLTextAreaElement): void {
   vscode.postMessage({
     type: "requestFileSuggestions",
     token: String(suggestionToken),
-    query: match[1] ?? "",
+    query: mention[1] ?? "",
   });
 }
 
-function acceptSuggestion(path: string): void {
-  const textarea = composer();
-  if (!textarea) {
-    return;
+function pickSuggestion(index: number): void {
+  if (popover?.kind === "files") {
+    const item = popover.items[index];
+    if (item) {
+      const cursor = composer.selectionStart;
+      const before = composer.value.slice(0, cursor).replace(/@[^\s@]*$/, "");
+      const after = composer.value.slice(cursor);
+      composer.value = `${before}${after}`;
+      composer.selectionStart = before.length;
+      composer.selectionEnd = before.length;
+      addAttachment({ kind: item.kind, path: item.path, label: item.label });
+    }
+  } else if (popover?.kind === "slash") {
+    const item = popover.items[index];
+    if (item?.kind === "builtin") {
+      composer.value = "";
+      vscode.postMessage({ type: "slashCommand", id: item.id });
+    } else if (item?.path) {
+      pendingSkill = { name: item.label, path: item.path };
+      composer.value = "";
+      renderAttachments();
+    }
   }
-  const cursor = textarea.selectionStart;
-  const before = textarea.value.slice(0, cursor).replace(/@[^\s@]*$/, "");
-  const after = textarea.value.slice(cursor);
-  textarea.value = `${before}${after}`;
-  textarea.selectionStart = before.length;
-  textarea.selectionEnd = before.length;
+  closePopover();
+  autoGrow();
+  saveDraft();
+  composer.focus();
+}
 
-  if (!attachments.includes(path)) {
-    attachments.push(path);
+function insertText(text: string, atCursor = false): void {
+  if (atCursor) {
+    const start = composer.selectionStart;
+    composer.setRangeText(text, start, composer.selectionEnd, "end");
+  } else {
+    const separator = composer.value.trim().length > 0 ? "\n\n" : "";
+    composer.value = `${composer.value}${separator}${text}`;
+    composer.selectionStart = composer.value.length;
+    composer.selectionEnd = composer.value.length;
   }
-  activeSuggestions = [];
-  renderAttachments();
-  renderSuggestions();
-  autoGrow(textarea);
-  textarea.focus();
+  autoGrow();
+  saveDraft();
+  composer.focus();
 }
 
-function insertIntoComposer(text: string): void {
-  const textarea = composer();
-  if (!textarea) {
-    return;
-  }
-  const separator = textarea.value.trim().length > 0 ? "\n\n" : "";
-  textarea.value = `${textarea.value}${separator}${text}`;
-  autoGrow(textarea);
-  textarea.focus();
-  textarea.selectionStart = textarea.value.length;
-  textarea.selectionEnd = textarea.value.length;
-}
-
-function composer(): HTMLTextAreaElement | null {
-  return document.getElementById("composer") as HTMLTextAreaElement | null;
-}
-
-function autoGrow(textarea: HTMLTextAreaElement): void {
-  textarea.style.height = "auto";
-  textarea.style.height = `${Math.min(textarea.scrollHeight, 220)}px`;
-}
-
-function scrollElement(): HTMLElement | null {
-  return document.getElementById("scroll");
+function autoGrow(): void {
+  composer.style.height = "auto";
+  composer.style.height = `${Math.min(composer.scrollHeight, 240)}px`;
 }
 
 function isNearBottom(): boolean {
-  const scroll = scrollElement();
-  if (!scroll) {
-    return true;
-  }
-  return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 120;
+  return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
 }
 
 function scrollToBottom(): void {
-  const scroll = scrollElement();
-  if (scroll) {
-    scroll.scrollTop = scroll.scrollHeight;
-  }
+  scroll.scrollTop = scroll.scrollHeight;
 }
 
-function commandStatusLabel(
-  status: string,
-  exitCode: number | null,
-  durationMs: number | null,
-): string {
-  if (status === "running") {
-    return "running…";
-  }
-  const parts: string[] = [];
-  if (exitCode !== null) {
-    parts.push(exitCode === 0 ? "exit 0" : `exit ${exitCode}`);
-  }
-  if (durationMs !== null) {
-    parts.push(formatDuration(durationMs));
-  }
-  return parts.join(" · ") || status;
+function updateJump(): void {
+  (document.getElementById("jump") as HTMLElement).hidden = isNearBottom();
 }
 
-function patchStatusLabel(status: string): string {
-  switch (status) {
-    case "pending":
-      return "awaiting approval";
-    case "applied":
-      return "applied";
-    case "aborted":
-      return "skipped";
-    default:
-      return "failed";
-  }
-}
-
-function formatDuration(ms: number): string {
-  if (ms < 1000) {
-    return `${ms}ms`;
-  }
-  if (ms < 60_000) {
-    return `${(ms / 1000).toFixed(1)}s`;
-  }
-  return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
-}
-
-function formatTokens(count: number): string {
-  if (count < 1000) {
-    return String(count);
-  }
-  if (count < 1_000_000) {
-    return `${(count / 1000).toFixed(1)}k`;
-  }
-  return `${(count / 1_000_000).toFixed(2)}M`;
-}
-
-/** Terminal output can be enormous; only the tail is interesting while scanning. */
-function tailLines(text: string, max: number): string {
-  const lines = text.split("\n");
-  if (lines.length <= max) {
-    return text;
-  }
-  return `… ${lines.length - max} earlier lines hidden\n${lines.slice(-max).join("\n")}`;
-}
