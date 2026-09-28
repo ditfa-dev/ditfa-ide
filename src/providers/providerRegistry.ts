@@ -144,13 +144,14 @@ export async function probeLocal(baseUrl: string): Promise<boolean> {
  * Reads the provider and model catalog.
  *
  * Providers come from `config.toml` (`[model_providers.*]`), which the server
- * exposes through `config/read`. Models come from `model/list`, which reflects
- * the catalog for the *currently configured* provider — so for a provider the
- * user has not switched to yet the picker also accepts a typed model name.
+ * exposes through `config/read`. `model/list` only knows the first-party
+ * catalog whatever provider is selected, so every other provider is asked
+ * directly: the picker lists what the key can actually use, not somebody else's
+ * models.
  */
 export class ProviderRegistry {
   private providerCache: ProviderInfo[] | undefined;
-  private modelCache = new Map<string, Model[]>();
+  private modelCache = new Map<string, ModelChoice[]>();
 
   constructor(
     private readonly client: AppServerClient,
@@ -167,7 +168,10 @@ export class ProviderRegistry {
       return this.providerCache;
     }
 
-    const configured = new Map<string, ProviderInfo>();
+    const merged = new Map<string, ProviderInfo>();
+    for (const provider of BUILT_IN_PROVIDERS) {
+      merged.set(provider.id, provider);
+    }
     try {
       const response = await this.client.request("config/read", {
         includeLayers: false,
@@ -180,12 +184,15 @@ export class ProviderRegistry {
             continue;
           }
           const entry = value as Record<string, unknown>;
-          configured.set(id, {
+          const builtIn = merged.get(id);
+          // Config entries win on name and URL.
+          merged.set(id, {
             id,
-            name: typeof entry.name === "string" ? entry.name : id,
-            baseUrl: typeof entry.base_url === "string" ? entry.base_url : null,
-            envKey: typeof entry.env_key === "string" ? entry.env_key : null,
-            builtIn: false,
+            name: typeof entry.name === "string" ? entry.name : (builtIn?.name ?? id),
+            baseUrl: typeof entry.base_url === "string" ? entry.base_url : (builtIn?.baseUrl ?? null),
+            envKey: typeof entry.env_key === "string" ? entry.env_key : (builtIn?.envKey ?? null),
+            builtIn: builtIn?.builtIn ?? false,
+            kind: builtIn?.kind ?? "apiKey",
           });
         }
       }
@@ -197,28 +204,45 @@ export class ProviderRegistry {
       );
     }
 
-    // Config entries win on name and URL; built-ins fill in the rest so a fresh
-    // install still shows something useful.
-    const merged = new Map<string, ProviderInfo>();
-    for (const provider of BUILT_IN_PROVIDERS) {
-      merged.set(provider.id, provider);
-    }
-    for (const [id, provider] of configured) {
-      const builtIn = merged.get(id);
-      merged.set(id, { ...provider, builtIn: builtIn?.builtIn ?? false });
-    }
-
-    this.providerCache = [...merged.values()].sort((a, b) => a.name.localeCompare(b.name));
+    this.providerCache = [...merged.values()];
     return this.providerCache;
   }
 
-  /** Lists models known to the server, following pagination to the end. */
-  async listModels(providerId: string): Promise<Model[]> {
-    const cached = this.modelCache.get(providerId);
+  /** The provider `config.toml` selects, for when the extension has not picked one. */
+  async configuredDefaults(cwd?: string): Promise<{ provider: string | null; model: string | null }> {
+    try {
+      const response = await this.client.request("config/read", {
+        includeLayers: false,
+        cwd: cwd ?? null,
+      });
+      const config = response.config as Record<string, unknown>;
+      return {
+        provider: typeof config.model_provider === "string" ? config.model_provider : null,
+        model: typeof config.model === "string" ? config.model : null,
+      };
+    } catch {
+      return { provider: null, model: null };
+    }
+  }
+
+  /** Lists the models `provider` offers. Throws with a readable reason. */
+  async listModels(provider: ProviderInfo | null, apiKey?: string): Promise<ModelChoice[]> {
+    const key = provider?.id ?? "default";
+    const cached = this.modelCache.get(key);
     if (cached) {
       return cached;
     }
 
+    const usesServerCatalog = !provider || provider.id === "openai" || provider.id === "ditfa";
+    const models =
+      usesServerCatalog || !provider?.baseUrl
+        ? await this.listServerModels()
+        : await this.listRemoteModels(provider, apiKey);
+    this.modelCache.set(key, models);
+    return models;
+  }
+
+  private async listServerModels(): Promise<ModelChoice[]> {
     const models: Model[] = [];
     let cursor: string | null = null;
     do {
@@ -232,7 +256,44 @@ export class ProviderRegistry {
       // Defensive: a server that keeps returning the same cursor would loop.
     } while (cursor && models.length < 500);
 
-    this.modelCache.set(providerId, models);
-    return models;
+    return models.map((model) => ({
+      id: model.model,
+      label: model.displayName || model.model,
+      description: model.description || null,
+      efforts: model.supportedReasoningEfforts.map((option) => option.reasoningEffort),
+      isDefault: model.isDefault,
+    }));
+  }
+
+  private async listRemoteModels(provider: ProviderInfo, apiKey?: string): Promise<ModelChoice[]> {
+    const headers: Record<string, string> = {};
+    if (apiKey) {
+      headers.Authorization = `Bearer ${apiKey}`;
+      if (provider.id === "anthropic") {
+        headers["x-api-key"] = apiKey;
+        headers["anthropic-version"] = "2023-06-01";
+      }
+    }
+
+    let response: Response;
+    try {
+      response = await fetch(`${provider.baseUrl}/models`, {
+        headers,
+        signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
+      });
+    } catch {
+      throw new Error(
+        provider.kind === "local"
+          ? `${provider.name} is not running on ${provider.baseUrl}.`
+          : `Could not reach ${provider.name}.`,
+      );
+    }
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(`${provider.name} rejected the API key.`);
+    }
+    if (!response.ok) {
+      throw new Error(`${provider.name} answered HTTP ${response.status}.`);
+    }
+    return parseModelList(await response.json());
   }
 }
