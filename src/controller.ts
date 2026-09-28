@@ -166,9 +166,17 @@ export class DitfaController implements vscode.Disposable {
             void this.reconnect("configuration changed");
           }
         } else if (event.affectsConfiguration("ditfa")) {
+          void this.refreshProviderReady();
           this.pushHeader();
         }
       }),
+      vscode.window.onDidChangeActiveTextEditor(() => this.editorEmitter.fire(this.activeEditor())),
+      vscode.window.onDidChangeTextEditorSelection((event) => {
+        if (event.textEditor === vscode.window.activeTextEditor) {
+          this.editorEmitter.fire(this.activeEditor());
+        }
+      }),
+      vscode.workspace.onDidChangeWorkspaceFolders(() => this.pushHeader()),
     );
   }
 
@@ -178,10 +186,6 @@ export class DitfaController implements vscode.Disposable {
 
   get accountManager(): AccountManager | undefined {
     return this.account;
-  }
-
-  get providerRegistry(): ProviderRegistry | undefined {
-    return this.providers;
   }
 
   get approvalService(): ApprovalService | undefined {
@@ -194,6 +198,11 @@ export class DitfaController implements vscode.Disposable {
 
   get threadSession(): ThreadSession | undefined {
     return this.session;
+  }
+
+  /** The engine to launch from a terminal, when one has been found. */
+  get executable(): string | undefined {
+    return this.binary?.path;
   }
 
   snapshot(): SessionState {
@@ -212,10 +221,7 @@ export class DitfaController implements vscode.Disposable {
 
   /** Connects if not already connected. Safe to call repeatedly. */
   async connect(): Promise<void> {
-    if (this.disposed) {
-      return;
-    }
-    if (this.client?.isRunning) {
+    if (this.disposed || this.client?.isRunning) {
       return;
     }
     if (this.connecting) {
@@ -229,80 +235,102 @@ export class DitfaController implements vscode.Disposable {
 
   async reconnect(reason: string): Promise<void> {
     this.logger.info(`reconnecting: ${reason}`);
+    this.crashTimes = [];
+    await this.connecting?.catch(() => undefined);
     this.teardownConnection();
     await this.connect();
   }
 
   async newThread(): Promise<void> {
+    await this.connect();
     const session = this.session;
     if (!session) {
-      await this.connect();
       return;
     }
+    if (session.turnActive) {
+      await this.interrupt();
+    }
     this.approvals?.cancelAll();
-    await session.start(readSettings(), resolveWorkspaceRoot());
+    // The thread is created by the first message, so an unused one leaves no trace.
+    session.clear();
+    await this.rememberThread(null);
     this.stateEmitter.fire();
   }
 
-  /** Lists recent threads for this workspace and resumes the chosen one. */
-  async resumeThread(): Promise<void> {
+  async listThreads(query: string): Promise<ThreadSummary[]> {
+    await this.connect();
     const client = this.client;
-    const session = this.session;
-    if (!client || !session) {
-      void vscode.window.showWarningMessage("Ditfa is not connected yet.");
-      return;
+    if (!client) {
+      return [];
     }
-
-    const cwd = resolveWorkspaceRoot();
+    const roots = workspaceRoots();
     const response = await client.request("thread/list", {
-      limit: 40,
-      cwd: cwd ?? null,
+      limit: 50,
+      cwd: roots.length > 0 ? roots : null,
       archived: false,
+      sortKey: "updated_at",
+      searchTerm: query.trim() || null,
     });
+    const active = this.session?.threadId;
+    return response.data.map((thread) => ({
+      id: thread.id,
+      title: thread.name || thread.preview || "Untitled conversation",
+      updatedAt: thread.updatedAt * 1000,
+      provider: thread.modelProvider,
+      active: thread.id === active,
+    }));
+  }
 
-    if (response.data.length === 0) {
-      void vscode.window.showInformationMessage("No previous Ditfa threads in this workspace.");
+  async resumeThread(threadId: string): Promise<void> {
+    await this.connect();
+    const session = this.session;
+    if (!session || session.threadId === threadId) {
       return;
     }
-
-    const picked = await vscode.window.showQuickPick(
-      response.data.map((thread) => ({
-        threadId: thread.id,
-        label: thread.name || thread.preview || "(untitled thread)",
-        description: new Date(thread.updatedAt * 1000).toLocaleString(),
-        detail: `${thread.modelProvider}  ·  ${thread.cwd}`,
-      })),
-      { title: "Ditfa: Resume Thread", placeHolder: "Pick a thread to continue", matchOnDetail: true },
-    );
-    if (!picked) {
-      return;
+    if (session.turnActive) {
+      await this.interrupt();
     }
-
     this.approvals?.cancelAll();
-    await session.resume(picked.threadId, readSettings(), cwd);
+    await session.resume(threadId, readSettings(), resolveWorkspaceRoot());
+    await this.rememberThread(threadId);
     this.stateEmitter.fire();
   }
 
-  async send(text: string, attachments: string[]): Promise<void> {
+  async renameThread(threadId: string, title: string): Promise<void> {
+    await this.client?.request("thread/name/set", { threadId, name: title });
+  }
+
+  async deleteThread(threadId: string): Promise<void> {
+    await this.client?.request("thread/delete", { threadId });
+    await this.store.remove(threadId);
+    if (this.session?.threadId === threadId) {
+      await this.newThread();
+    }
+  }
+
+  async send(
+    text: string,
+    attachments: ContextAttachment[],
+    skill: { name: string; path: string } | null = null,
+    includeActiveFile = true,
+  ): Promise<void> {
+    await this.connect();
     const session = this.session;
     if (!session) {
-      void vscode.window.showWarningMessage("Ditfa is not connected yet.");
+      void vscode.window.showWarningMessage("The Ditfa engine is not running yet.");
       return;
     }
-    const settings = readSettings();
-
-    // Echo the message immediately: app-server only emits the user item once the
-    // turn starts, and a message that vanishes on send feels broken.
-    this.entryEmitter.fire({
-      id: `local-user-${Date.now()}`,
-      kind: "user",
-      at: Date.now(),
-      text,
-      attachments,
-    });
 
     try {
-      await session.send(text, attachments, settings);
+      if (!session.threadId) {
+        await session.start(this.effectiveSettings(), resolveWorkspaceRoot());
+        await this.rememberThread(session.threadId);
+      }
+      this.budgetTripped = false;
+      const active = includeActiveFile && readSettings().attachActiveFile ? this.activeFileContext() : null;
+      const input = buildUserInput(text, attachments, active, skill, session.takeNotes());
+      const labels = attachments.map((item) => item.label);
+      await session.send({ text, attachments: labels }, input, this.turnOptions());
     } catch (error) {
       this.logger.error("failed to start turn", error);
       void vscode.window.showErrorMessage(
@@ -311,11 +339,73 @@ export class DitfaController implements vscode.Disposable {
     }
   }
 
+  /** Stop means stop: a turn that does not end promptly loses its engine. */
   async interrupt(): Promise<void> {
+    const session = this.session;
+    if (!session?.turnActive) {
+      return;
+    }
     try {
-      await this.session?.interrupt();
+      await session.interrupt();
     } catch (error) {
       this.logger.error("interrupt failed", error);
+    }
+    clearTimeout(this.stopTimer);
+    this.stopTimer = setTimeout(() => {
+      if (this.session === session && session.turnActive) {
+        this.logger.warn("turn ignored the interrupt; restarting the engine");
+        void this.restartKeepingThread("The turn did not stop, so the engine was restarted.");
+      }
+    }, STOP_DEADLINE_MS);
+  }
+
+  async review(): Promise<void> {
+    await this.ensureThread();
+    await this.session?.review();
+  }
+
+  async compact(): Promise<void> {
+    await this.session?.compact();
+  }
+
+  async runSlashCommand(id: string): Promise<void> {
+    switch (id) {
+      case "new":
+        await this.newThread();
+        break;
+      case "review":
+        await this.review();
+        break;
+      case "compact":
+        await this.compact();
+        break;
+      case "undo": {
+        const turnId = this.session?.latestTurnId;
+        if (turnId) {
+          await this.restoreCheckpoint(turnId);
+        }
+        break;
+      }
+      case "doctor":
+        await this.runDoctor();
+        break;
+    }
+  }
+
+  async runErrorAction(action: ErrorAction): Promise<void> {
+    switch (action) {
+      case "signIn":
+        await this.setupProvider(this.effectiveProviderId() ?? "ditfa");
+        break;
+      case "retry":
+        await this.session?.resend(this.turnOptions());
+        break;
+      case "compact":
+        await this.compact();
+        break;
+      case "selectModel":
+        await vscode.commands.executeCommand("ditfa.selectProvider");
+        break;
     }
   }
 
@@ -330,10 +420,118 @@ export class DitfaController implements vscode.Disposable {
       ?.snapshot()
       .entries.find((candidate) => candidate.id === entryId && candidate.kind === "fileChange");
     const applied = entry?.kind === "fileChange" && entry.status === "applied";
-    await this.diffs.showChange(change, applied);
+    await this.diffs.showChange(change, applied, this.threadCwd());
   }
 
-  async searchFiles(query: string, limit = 12): Promise<{ label: string; path: string }[]> {
+  /**
+   * The agent believes the whole patch landed. When the user left hunks out mid-turn,
+   * say so now, as a steer, instead of letting it build on lines that are gone.
+   */
+  private async tellAgentWhatWasLeftOut(session: ThreadSession): Promise<void> {
+    if (!session.turnActive) {
+      return;
+    }
+    const notes = session.takeNotes();
+    if (notes.length === 0) {
+      return;
+    }
+    const text = notes.join("\n");
+    try {
+      await session.send({ text, attachments: [] }, [{ type: "text", text, text_elements: [] }], this.turnOptions());
+    } catch (error) {
+      this.logger.warn(`could not tell the agent about the hunks left out: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  /** Takes chosen hunks of an applied edit back out. */
+  async revertHunks(entryId: string, path: string, hunks: number[]): Promise<void> {
+    await this.hunkReview.revertHunks(entryId, path, hunks);
+  }
+
+  async undoFile(entryId: string, path: string): Promise<void> {
+    await this.hunkReview.undoFile(entryId, path);
+  }
+
+  async reviewTurn(turnId: string): Promise<void> {
+    const changes = this.session?.changesIn(turnId) ?? [];
+    if (changes.length > 0) {
+      await this.diffs.showAll("Ditfa: changes in this turn", changes, this.threadCwd());
+    }
+  }
+
+  /**
+   * Rewinds to just before `turnId`: reverts the files the agent changed since,
+   * drops those turns from the conversation, and puts the message back in the
+   * composer so it can be edited and sent again.
+   */
+  async restoreCheckpoint(turnId: string): Promise<void> {
+    const session = this.session;
+    const cwd = this.threadCwd();
+    if (!session || !cwd) {
+      return;
+    }
+    if (session.turnActive) {
+      void vscode.window.showWarningMessage("Stop the current turn first.");
+      return;
+    }
+
+    const changes = session.changesSince(turnId);
+    const plan = await planRevert(changes, cwd, readText);
+
+    // A file with unsaved edits would be silently overwritten on disk.
+    const dirty = new Set(
+      vscode.workspace.textDocuments.filter((doc) => doc.isDirty).map((doc) => doc.uri.fsPath),
+    );
+    const steps = plan.steps.filter((step) => !dirty.has(step.path));
+    const skipped = [
+      ...plan.skipped,
+      ...plan.steps
+        .filter((step) => dirty.has(step.path))
+        .map((step) => ({ path: step.path, reason: "it has unsaved edits" })),
+    ];
+
+    const fileLine =
+      steps.length === 0
+        ? "No files need reverting."
+        : `${steps.length} file${steps.length === 1 ? "" : "s"} will be reverted.`;
+    const skippedLine =
+      skipped.length > 0
+        ? `\n\nLeft alone:\n${skipped.map((item) => `• ${vscode.workspace.asRelativePath(item.path)}: ${item.reason}`).join("\n")}`
+        : "";
+    const confirmed = await vscode.window.showWarningMessage(
+      "Go back to before this message?",
+      {
+        modal: true,
+        detail: `${fileLine} The conversation rewinds to this point.\n\nEffects of commands the agent ran, such as installed packages, are not undone.${skippedLine}`,
+      },
+      "Restore",
+    );
+    if (confirmed !== "Restore") {
+      return;
+    }
+
+    for (const step of steps) {
+      const uri = vscode.Uri.file(step.path);
+      if (step.content === null) {
+        await vscode.workspace.fs.delete(uri, { useTrash: true });
+      } else {
+        await vscode.workspace.fs.writeFile(uri, Buffer.from(step.content, "utf8"));
+      }
+    }
+
+    const original = session.userEntryFor(turnId);
+    try {
+      await session.rollbackTo(turnId);
+      if (original) {
+        this.composerEmitter.fire(original.text);
+      }
+    } catch (error) {
+      this.logger.error("rollback failed", error);
+      session.notice("Files were restored, but the conversation could not be rewound.", "warning");
+    }
+  }
+
+  async searchFiles(query: string, limit = 12): Promise<FileSuggestion[]> {
     const client = this.client;
     const cwd = resolveWorkspaceRoot();
     if (!client || !cwd) {

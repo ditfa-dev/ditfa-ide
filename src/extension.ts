@@ -1,8 +1,10 @@
 import * as vscode from "vscode";
 
 import { registerCommands } from "./commands/register";
+import { CompletionService } from "./completion/inlineProvider";
 import { DitfaController } from "./controller";
 import { ChatViewProvider } from "./ui/chatViewProvider";
+import { DitfaCodeActions } from "./ui/codeActions";
 import { Logger } from "./util/logger";
 
 export function activate(context: vscode.ExtensionContext): void {
