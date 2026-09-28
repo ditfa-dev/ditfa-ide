@@ -1,22 +1,76 @@
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import * as vscode from "vscode";
 
 import { AccountManager } from "./account/accountManager";
+import { ApiKeys } from "./account/apiKeys";
 import { DitfaStatusBar } from "./account/statusBar";
 import { ApprovalService } from "./approvals/approvalService";
+import { planRevert } from "./checkpoints/revert";
 import { AppServerClient } from "./client/appServerClient";
-import { BinaryNotFoundError, describeMissingBinary, resolveBinary } from "./client/binary";
+import {
+  BinaryNotFoundError,
+  managedBinaryDirectory,
+  resolveBinary,
+  type ResolvedBinary,
+} from "./client/binary";
+import { buildDoctorReport } from "./client/doctor";
+import { installEngine } from "./client/installer";
 import { DiffService } from "./diff/diffService";
-import { ProviderRegistry } from "./providers/providerRegistry";
-import { ThreadSession } from "./session/threadSession";
+import { CompletionSetup } from "./completion/setup";
+import { HunkReview } from "./diff/hunkReview";
+import {
+  BUILT_IN_PROVIDERS,
+  PROVIDER_ENV_KEYS,
+  probeLocal,
+  ProviderRegistry,
+  type ProviderInfo,
+} from "./providers/providerRegistry";
+import { buildUserInput, type ActiveFileContext } from "./session/promptContext";
+import { ThreadSession, type TurnOptions } from "./session/threadSession";
+import { TranscriptStore } from "./session/transcriptStore";
 import type {
+  ActiveEditorInfo,
+  AgentMode,
   ChatEntry,
   ConnectionState,
+  ContextAttachment,
+  ErrorAction,
   FileChangeSummary,
+  FileSuggestion,
+  InstallProgress,
+  ModelCatalog,
   SessionHeader,
   SessionState,
+  SetupOption,
+  SlashCommand,
+  ThreadSummary,
 } from "./session/types";
 import type { Logger } from "./util/logger";
-import { readSettings, resolveWorkspaceRoot } from "./util/settings";
+import {
+  modeFromSettings,
+  readSettings,
+  resolveWorkspaceRoot,
+  sandboxPolicyFor,
+  settingsForMode,
+  updateSetting,
+  workspaceRoots,
+} from "./util/settings";
+
+const LAST_THREAD_KEY = "ditfa.lastThreadId";
+/** Crashes allowed inside the window before giving up and showing the error. */
+const MAX_RESTARTS = 3;
+const RESTART_WINDOW_MS = 120_000;
+/** How long a turn gets to honor Stop before the engine is restarted under it. */
+const STOP_DEADLINE_MS = 6_000;
+
+const BUILTIN_COMMANDS: SlashCommand[] = [
+  { id: "new", label: "new", detail: "Start a new conversation", kind: "builtin" },
+  { id: "review", label: "review", detail: "Review uncommitted changes", kind: "builtin" },
+  { id: "compact", label: "compact", detail: "Summarize the conversation to free up context", kind: "builtin" },
+  { id: "undo", label: "undo", detail: "Undo the last turn's file changes", kind: "builtin" },
+  { id: "doctor", label: "doctor", detail: "Run diagnostics", kind: "builtin" },
+];
 
 /**
  * Wires the app-server connection to everything that depends on it.
@@ -24,12 +78,17 @@ import { readSettings, resolveWorkspaceRoot } from "./util/settings";
  * The connection is the only thing here with a lifecycle: services are rebuilt
  * on every (re)connect, so a crashed server recovers by calling `connect()`
  * again rather than by threading reconnection logic through each service.
+ * Nothing starts until the panel is opened or a command needs it; an editor
+ * window the user never asks anything in costs no engine process.
  */
 export class DitfaController implements vscode.Disposable {
   private client: AppServerClient | undefined;
+  private binary: ResolvedBinary | null = null;
+  private binaryAttempts: string[] = [];
   private connectionState: ConnectionState = "starting";
   private connectionError: string | null = null;
   private connecting: Promise<void> | undefined;
+  private install: InstallProgress | null = null;
   private disposed = false;
 
   private session: ThreadSession | undefined;
@@ -37,13 +96,31 @@ export class DitfaController implements vscode.Disposable {
   private account: AccountManager | undefined;
   private providers: ProviderRegistry | undefined;
 
+  private configuredProvider: string | null = null;
+  private configuredModel: string | null = null;
+  private crashTimes: number[] = [];
+  private restartTimer: NodeJS.Timeout | undefined;
+  private stopTimer: NodeJS.Timeout | undefined;
+  private budgetTripped = false;
+  /** Set when a key for the selected provider is stored or the provider needs none. */
+  private providerReady = false;
+
+  private readonly keys: ApiKeys;
+  private readonly store: TranscriptStore;
   private readonly diffs: DiffService;
+  private readonly hunkReview: HunkReview;
+  /** Tab autocomplete's way into this controller's keys and providers. */
+  readonly completion: CompletionSetup;
   private readonly statusBar: DitfaStatusBar;
   private readonly subscriptions: vscode.Disposable[] = [];
+  private serviceSubscriptions: vscode.Disposable[] = [];
 
   private readonly stateEmitter = new vscode.EventEmitter<void>();
   private readonly patchEmitter = new vscode.EventEmitter<Partial<SessionState>>();
   private readonly entryEmitter = new vscode.EventEmitter<ChatEntry>();
+  private readonly removeEmitter = new vscode.EventEmitter<string>();
+  private readonly composerEmitter = new vscode.EventEmitter<string>();
+  private readonly editorEmitter = new vscode.EventEmitter<ActiveEditorInfo | null>();
 
   /** Fires when the whole state should be re-pushed (connect, reset, new thread). */
   readonly onDidResetState = this.stateEmitter.event;
@@ -51,12 +128,30 @@ export class DitfaController implements vscode.Disposable {
   readonly onDidPatchState = this.patchEmitter.event;
   /** Fires when a single transcript entry is added or updated. */
   readonly onDidUpsertEntry = this.entryEmitter.event;
+  readonly onDidRemoveEntry = this.removeEmitter.event;
+  /** Fires with text the composer should hold, such as a message that was rewound. */
+  readonly onDidSetComposer = this.composerEmitter.event;
+  readonly onDidChangeActiveEditor = this.editorEmitter.event;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly logger: Logger,
   ) {
+    this.keys = new ApiKeys(context.secrets);
+    this.store = new TranscriptStore(join(context.globalStorageUri.fsPath, "transcripts"), logger);
     this.diffs = new DiffService(logger);
+    this.hunkReview = new HunkReview(
+      () => this.session,
+      () => this.threadCwd(),
+      logger,
+    );
+    this.completion = new CompletionSetup({
+      keys: this.keys,
+      providers: async () =>
+        this.providers ? this.providers.listProviders(resolveWorkspaceRoot()) : BUILT_IN_PROVIDERS,
+      chatProvider: () => this.effectiveProviderId(),
+      chatModel: () => readSettings().model || this.session?.snapshot().context?.model || this.configuredModel || "",
+    });
     this.statusBar = new DitfaStatusBar();
     this.updateStatusBar();
 
@@ -67,7 +162,9 @@ export class DitfaController implements vscode.Disposable {
           event.affectsConfiguration("ditfa.ditfaHome") ||
           event.affectsConfiguration("ditfa.env")
         ) {
-          void this.reconnect("configuration changed");
+          if (this.client) {
+            void this.reconnect("configuration changed");
+          }
         } else if (event.affectsConfiguration("ditfa")) {
           this.pushHeader();
         }

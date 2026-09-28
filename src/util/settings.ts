@@ -1,6 +1,7 @@
 import * as vscode from "vscode";
 
-import type { AskForApproval, ReasoningEffort, SandboxMode } from "../protocol";
+import type { AskForApproval, ReasoningEffort, SandboxMode, SandboxPolicy } from "../protocol";
+import type { AgentMode } from "../session/types";
 
 export interface DitfaSettings {
   executablePath: string;
@@ -10,8 +11,11 @@ export interface DitfaSettings {
   reasoningEffort: ReasoningEffort | null;
   approvalPolicy: AskForApproval;
   sandboxMode: SandboxMode;
+  allowNetwork: boolean;
   showReasoning: boolean;
   attachActiveFile: boolean;
+  /** Stop a turn past this many tokens. 0 turns the guard off. */
+  maxTokensPerTurn: number;
   env: Record<string, string>;
 }
 
