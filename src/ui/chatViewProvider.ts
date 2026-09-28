@@ -206,31 +206,69 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case "openDiff":
-        await this.controller.openDiff(message.entryId, message.path);
+        await controller.openDiff(message.entryId, message.path);
+        break;
+
+      case "reviewTurn":
+        await controller.reviewTurn(message.turnId);
+        break;
+
+      case "restoreCheckpoint":
+        await controller.restoreCheckpoint(message.turnId);
+        break;
+
+      case "revertHunks":
+        await controller.revertHunks(message.entryId, message.path, message.hunks);
+        break;
+
+      case "undoFile":
+        await controller.undoFile(message.entryId, message.path);
         break;
 
       case "openFile": {
-        const uri = vscode.Uri.file(message.path);
+        const root = resolveWorkspaceRoot();
+        const uri =
+          root && !isAbsolute(message.path)
+            ? vscode.Uri.joinPath(vscode.Uri.file(root), message.path)
+            : vscode.Uri.file(message.path);
         const document = await vscode.workspace.openTextDocument(uri);
         const editor = await vscode.window.showTextDocument(document);
         if (message.line !== undefined) {
           const position = new vscode.Position(Math.max(0, message.line - 1), 0);
-          editor.revealRange(new vscode.Range(position, position));
+          editor.revealRange(new vscode.Range(position, position), vscode.TextEditorRevealType.InCenter);
           editor.selection = new vscode.Selection(position, position);
         }
         break;
       }
 
-      case "selectModel":
-        await vscode.commands.executeCommand("ditfa.selectModel");
+      case "openExternal":
+        if (/^https?:\/\//i.test(message.url)) {
+          await vscode.env.openExternal(vscode.Uri.parse(message.url));
+        }
         break;
 
-      case "selectApprovalMode":
-        await vscode.commands.executeCommand("ditfa.selectApprovalMode");
+      case "requestModels":
+        this.post({ type: "models", catalog: await controller.modelCatalog() });
+        break;
+
+      case "selectModel":
+        await controller.selectModel(message.model, message.effort);
+        break;
+
+      case "selectProvider":
+        await vscode.commands.executeCommand("ditfa.selectProvider");
+        break;
+
+      case "setMode":
+        await controller.setMode(message.mode);
         break;
 
       case "signIn":
-        await vscode.commands.executeCommand("ditfa.signIn");
+        this.post({ type: "setupOptions", options: await controller.setupOptions() });
+        break;
+
+      case "setupProvider":
+        await controller.setupProvider(message.id);
         break;
 
       case "showAccount":
@@ -241,18 +279,51 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         this.logger.show();
         break;
 
+      case "openSettings":
+        await vscode.commands.executeCommand("ditfa.openSettings");
+        break;
+
+      case "runDoctor":
+        await controller.runDoctor();
+        break;
+
       case "retryConnection":
-        await this.controller.reconnect("requested from the chat panel");
+        await controller.reconnect("requested from the chat panel");
+        break;
+
+      case "installEngine":
+        await controller.installEngine();
+        this.post({ type: "slashCommands", commands: await controller.slashCommands() });
+        break;
+
+      case "locateBinary":
+        await vscode.commands.executeCommand("ditfa.locateBinary");
+        break;
+
+      case "openFolder":
+        await vscode.commands.executeCommand("vscode.openFolder");
         break;
 
       case "requestFileSuggestions": {
-        const results = await this.controller.searchFiles(message.query);
+        const results = await controller.searchFiles(message.query);
         this.post({ type: "fileSuggestions", token: message.token, results });
         break;
       }
 
+      case "slashCommand":
+        await controller.runSlashCommand(message.id);
+        break;
+
+      case "errorAction":
+        await controller.runErrorAction(message.action);
+        break;
+
       case "copy":
         await vscode.env.clipboard.writeText(message.text);
+        break;
+
+      case "webviewError":
+        this.logger.error(`webview: ${message.message}`);
         break;
     }
   }

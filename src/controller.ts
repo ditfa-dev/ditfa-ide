@@ -533,19 +533,38 @@ export class DitfaController implements vscode.Disposable {
 
   async searchFiles(query: string, limit = 12): Promise<FileSuggestion[]> {
     const client = this.client;
-    const cwd = resolveWorkspaceRoot();
-    if (!client || !cwd) {
+    const roots = workspaceRoots();
+    if (roots.length === 0) {
       return [];
     }
+
+    // An empty query means "what am I working on": offer the open tabs.
+    if (query.length === 0) {
+      return vscode.window.tabGroups.all
+        .flatMap((group) => group.tabs)
+        .flatMap((tab) => (tab.input instanceof vscode.TabInputText ? [tab.input.uri] : []))
+        .filter((uri) => uri.scheme === "file")
+        .slice(0, limit)
+        .map((uri) => ({
+          label: uri.path.split("/").pop() ?? uri.fsPath,
+          path: vscode.workspace.asRelativePath(uri, false),
+          kind: "file" as const,
+        }));
+    }
+
     try {
+      if (!client) {
+        throw new Error("not connected");
+      }
       const response = await client.request("fuzzyFileSearch", {
         query,
-        roots: [cwd],
+        roots,
         cancellationToken: null,
       });
       return response.files.slice(0, limit).map((file) => ({
         label: file.file_name,
-        path: file.path,
+        path: roots.length === 1 ? file.path : join(file.root, file.path),
+        kind: "file" as const,
       }));
     } catch (error) {
       this.logger.debug(
@@ -554,27 +573,305 @@ export class DitfaController implements vscode.Disposable {
         }`,
       );
       const uris = await vscode.workspace.findFiles(
-        `**/*${query}*`,
+        `**/*${query.replace(/[*?[\]{}]/g, "")}*`,
         "**/{node_modules,target,dist,.git}/**",
         limit,
       );
       return uris.map((uri) => ({
         label: uri.path.split("/").pop() ?? uri.fsPath,
         path: vscode.workspace.asRelativePath(uri, false),
+        kind: "file" as const,
       }));
     }
   }
 
+  activeEditor(): ActiveEditorInfo | null {
+    const editor = vscode.window.activeTextEditor;
+    if (!editor || editor.document.uri.scheme !== "file") {
+      return null;
+    }
+    const selection = editor.selection;
+    return {
+      path: vscode.workspace.asRelativePath(editor.document.uri, false),
+      label: editor.document.uri.path.split("/").pop() ?? editor.document.fileName,
+      selection: selection.isEmpty
+        ? null
+        : { start: selection.start.line + 1, end: selection.end.line + 1 },
+    };
+  }
+
+  /** Commands and skills for the `/` menu. Skills are the user's own, so they go first. */
+  async slashCommands(): Promise<SlashCommand[]> {
+    if (!this.client) {
+      return BUILTIN_COMMANDS;
+    }
+    try {
+      const roots = workspaceRoots();
+      const response = await this.client.request("skills/list", { cwds: roots });
+      const skills = response.data
+        .flatMap((entry) => entry.skills)
+        .filter((skill) => skill.enabled)
+        .map(
+          (skill): SlashCommand => ({
+            id: `skill:${skill.name}`,
+            label: skill.name,
+            detail: skill.shortDescription ?? skill.description,
+            kind: "skill",
+            path: skill.path,
+          }),
+        );
+      return [...BUILTIN_COMMANDS, ...skills];
+    } catch (error) {
+      this.logger.debug(`skills/list failed: ${error instanceof Error ? error.message : error}`);
+      return BUILTIN_COMMANDS;
+    }
+  }
+
+  async setupOptions(): Promise<SetupOption[]> {
+    const options: SetupOption[] = [];
+    for (const provider of BUILT_IN_PROVIDERS) {
+      const ready =
+        provider.kind === "local" && provider.baseUrl
+          ? await probeLocal(provider.baseUrl)
+          : provider.envKey
+            ? await this.keys.has(provider.envKey)
+            : false;
+      options.push({
+        id: provider.id,
+        label: provider.id === "ditfa" ? "Sign in with Ditfa" : provider.name,
+        detail:
+          provider.kind === "local"
+            ? ready
+              ? "Running on this machine"
+              : "Not running"
+            : provider.kind === "account"
+              ? "Your Ditfa plan, every model, nothing to configure"
+              : "Use your own API key",
+        kind: provider.kind,
+        ready,
+      });
+    }
+    return options;
+  }
+
+  /** Makes `id` the active provider, collecting whatever it needs first. */
+  async setupProvider(id: string): Promise<void> {
+    const provider = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === id);
+    if (!provider) {
+      return;
+    }
+
+    if (provider.kind === "account") {
+      await this.setupDitfaAccount(provider);
+      return;
+    }
+
+    if (provider.kind === "apiKey") {
+      const apiKey = await vscode.window.showInputBox({
+        title: `${provider.name} API key`,
+        prompt: provider.keyUrl
+          ? `Stored in your system keychain. Create one at ${provider.keyUrl}`
+          : "Stored in your system keychain",
+        password: true,
+        ignoreFocusOut: true,
+        validateInput: (value) => (value.trim().length === 0 ? "Enter an API key" : undefined),
+      });
+      if (!apiKey) {
+        return;
+      }
+      if (provider.envKey) {
+        await this.keys.set(provider.envKey, apiKey.trim());
+      } else {
+        await this.account?.saveOpenAiKey(apiKey.trim());
+      }
+    }
+
+    await this.activateProvider(provider);
+  }
+
+  private async setupDitfaAccount(provider: ProviderInfo): Promise<void> {
+    const method = await vscode.window.showQuickPick(
+      [
+        {
+          id: "login" as const,
+          label: "$(globe) Sign in with your browser",
+          detail: "Confirm a one-time code on chat.ditfa.com",
+        },
+        {
+          id: "key" as const,
+          label: "$(key) Paste a Ditfa API key",
+          detail: "Create one at chat.ditfa.com/api-keys",
+        },
+      ],
+      { title: "Sign in to Ditfa" },
+    );
+    if (method?.id === "login" && this.binary) {
+      await this.account?.signIn(this.binary.path, () => void this.activateProvider(provider));
+    } else if (method?.id === "key" && provider.envKey) {
+      const apiKey = await vscode.window.showInputBox({
+        title: "Ditfa API key",
+        prompt: "Stored in your system keychain",
+        password: true,
+        ignoreFocusOut: true,
+        validateInput: (value) => (value.trim().length === 0 ? "Enter an API key" : undefined),
+      });
+      if (apiKey) {
+        await this.keys.set(provider.envKey, apiKey.trim());
+        await this.activateProvider(provider);
+      }
+    }
+  }
+
+  /** Switches to `provider` and restarts so the engine sees any new key. */
+  private async activateProvider(provider: ProviderInfo): Promise<void> {
+    await updateSetting("provider", provider.id);
+    await updateSetting("model", "");
+    await this.reconnect(`provider set to ${provider.id}`);
+    await this.newThread();
+  }
+
+  async providerChoices(): Promise<ProviderInfo[]> {
+    await this.connect();
+    return (await this.providers?.listProviders(resolveWorkspaceRoot())) ?? BUILT_IN_PROVIDERS;
+  }
+
+  async modelCatalog(): Promise<ModelCatalog> {
+    await this.connect();
+    const providers = await this.providerChoices();
+    const id = this.effectiveProviderId();
+    const provider = providers.find((candidate) => candidate.id === id) ?? null;
+    const base = { provider: id, providerLabel: provider?.name ?? null };
+    if (!this.providers) {
+      return { ...base, models: [], error: "The Ditfa engine is not running." };
+    }
+    try {
+      const apiKey = provider?.envKey ? await this.keys.get(provider.envKey) : undefined;
+      const models = await this.providers.listModels(provider, apiKey);
+      return { ...base, models, error: null };
+    } catch (error) {
+      return { ...base, models: [], error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** A model change applies to the next message; the conversation carries on. */
+  async selectModel(model: string, effort: string | null): Promise<void> {
+    await updateSetting("model", model);
+    await updateSetting("reasoningEffort", effort ?? "");
+    this.pushHeader();
+  }
+
+  /** A provider is fixed for the life of a thread, so changing it starts a new one. */
+  async selectProvider(id: string): Promise<void> {
+    const provider = (await this.providerChoices()).find((candidate) => candidate.id === id);
+    if (!provider) {
+      return;
+    }
+    const needsKey = provider.envKey !== null && !(await this.keys.has(provider.envKey));
+    if (needsKey || provider.kind === "account") {
+      await this.setupProvider(id);
+      return;
+    }
+    await updateSetting("provider", id);
+    await updateSetting("model", "");
+    this.providers?.invalidate();
+    if (this.session?.threadId) {
+      await this.newThread();
+    }
+    await this.refreshProviderReady();
+    this.pushHeader();
+  }
+
+  async setMode(mode: AgentMode): Promise<void> {
+    if (mode === "full") {
+      const confirmed = await vscode.window.showWarningMessage(
+        "Full access removes the sandbox. The agent can run any command and change any file this account can reach, without asking.",
+        { modal: true },
+        "Enable full access",
+      );
+      if (confirmed !== "Enable full access") {
+        this.pushHeader();
+        return;
+      }
+    }
+    const next = settingsForMode(mode);
+    await updateSetting("approvalPolicy", next.approvalPolicy);
+    await updateSetting("sandboxMode", next.sandboxMode);
+    this.pushHeader();
+  }
+
+  /** Installs the engine, then connects. Driven by a button, never by surprise. */
+  async installEngine(): Promise<void> {
+    if (this.connectionState === "installing") {
+      return;
+    }
+    this.connectionState = "installing";
+    this.connectionError = null;
+    this.setInstallProgress({ stage: "download", percent: 0 });
+    try {
+      await this.connecting?.catch(() => undefined);
+      this.teardownConnection();
+      await installEngine(
+        managedBinaryDirectory(this.context),
+        (progress) => this.setInstallProgress(progress),
+        this.logger,
+      );
+      this.install = null;
+      this.connectionState = "starting";
+      await this.connect();
+    } catch (error) {
+      this.logger.error("engine install failed", error);
+      this.install = null;
+      this.failConnection(error instanceof Error ? error.message : String(error));
+    }
+  }
+
+  async runDoctor(): Promise<void> {
+    const settings = readSettings();
+    const stored: string[] = [];
+    for (const envKey of PROVIDER_ENV_KEYS) {
+      if (await this.keys.has(envKey)) {
+        stored.push(envKey);
+      }
+    }
+    const content = await buildDoctorReport({
+      extensionVersion: this.extensionVersion(),
+      binary: this.binary,
+      binaryAttempts: this.binaryAttempts,
+      connection: this.connectionState,
+      connectionError: this.connectionError,
+      engineVersion: this.client?.version ?? null,
+      provider: this.effectiveProviderId(),
+      model: settings.model || this.session?.snapshot().context?.model || this.configuredModel,
+      storedKeys: stored,
+    });
+    const document = await vscode.workspace.openTextDocument({ content, language: "markdown" });
+    await vscode.window.showTextDocument(document, { preview: true });
+  }
+
   dispose(): void {
     this.disposed = true;
+    clearTimeout(this.restartTimer);
+    clearTimeout(this.stopTimer);
     this.teardownConnection();
     this.diffs.dispose();
     this.statusBar.dispose();
     this.stateEmitter.dispose();
     this.patchEmitter.dispose();
     this.entryEmitter.dispose();
+    this.removeEmitter.dispose();
+    this.composerEmitter.dispose();
+    this.editorEmitter.dispose();
     for (const subscription of this.subscriptions) {
       subscription.dispose();
+    }
+  }
+
+  private async ensureThread(): Promise<void> {
+    await this.connect();
+    const session = this.session;
+    if (session && !session.threadId) {
+      await session.start(this.effectiveSettings(), resolveWorkspaceRoot());
+      await this.rememberThread(session.threadId);
     }
   }
 
@@ -585,13 +882,17 @@ export class DitfaController implements vscode.Disposable {
     this.updateStatusBar();
 
     const settings = readSettings();
-    let executable: string;
     try {
-      executable = resolveBinary(this.context, this.logger).path;
+      this.binary = resolveBinary(this.context, this.logger);
+      this.binaryAttempts = [];
     } catch (error) {
       if (error instanceof BinaryNotFoundError) {
-        this.failConnection("The `ditfa` executable was not found.");
-        void this.offerBinaryHelp(error);
+        this.binary = null;
+        this.binaryAttempts = error.attempts;
+        this.connectionState = "missingBinary";
+        this.publishState();
+        this.pushHeader();
+        this.updateStatusBar();
         return;
       }
       throw error;
@@ -599,10 +900,10 @@ export class DitfaController implements vscode.Disposable {
 
     try {
       const client = await AppServerClient.start({
-        executable,
+        executable: this.binary.path,
         cwd: resolveWorkspaceRoot(),
         ditfaHome: settings.ditfaHome || undefined,
-        env: settings.env,
+        env: { ...(await this.keys.environment(PROVIDER_ENV_KEYS)), ...settings.env },
         clientVersion: this.extensionVersion(),
         logger: this.logger,
       });
@@ -625,22 +926,21 @@ export class DitfaController implements vscode.Disposable {
     client.onNotification((notification) => {
       this.session?.handleNotification(notification);
       this.account?.handleNotification(notification);
+      if (notification.method === "serverRequest/resolved") {
+        this.approvals?.serverResolved(notification.params.requestId);
+      }
     });
 
     client.onExit(() => {
-      if (this.disposed) {
-        return;
+      if (!this.disposed && client === this.client) {
+        this.handleCrash(client.lastError());
       }
-      this.approvals?.cancelAll();
-      this.failConnection("The ditfa app-server stopped unexpectedly.");
     });
   }
 
   private async startServices(client: AppServerClient): Promise<void> {
-    const session = new ThreadSession(client, this.logger);
-    const approvals = new ApprovalService(this.logger, (itemId) =>
-      this.lookupFileChanges(itemId),
-    );
+    const session = new ThreadSession(client, this.logger, this.store);
+    const approvals = new ApprovalService(this.logger, (itemId) => this.lookupFileChanges(itemId));
     const account = new AccountManager(client, this.logger);
     const providers = new ProviderRegistry(client, this.logger);
 
@@ -651,7 +951,7 @@ export class DitfaController implements vscode.Disposable {
     this.account = account;
     this.providers = providers;
 
-    this.subscriptions.push(
+    this.serviceSubscriptions.push(
       session,
       approvals,
       account,
