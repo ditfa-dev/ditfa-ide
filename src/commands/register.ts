@@ -1,10 +1,10 @@
 import * as vscode from "vscode";
 
 import type { DitfaController } from "../controller";
-import { pickApprovalMode, pickModel, pickProvider } from "../providers/modelPicker";
+import type { ContextAttachment } from "../session/types";
 import type { ChatViewProvider } from "../ui/chatViewProvider";
 import type { Logger } from "../util/logger";
-import { readSettings, resolveWorkspaceRoot, updateSetting } from "../util/settings";
+import { resolveWorkspaceRoot, updateSetting } from "../util/settings";
 
 export function registerCommands(
   context: vscode.ExtensionContext,
@@ -36,63 +36,40 @@ export function registerCommands(
     await controller.newThread();
   });
 
-  register("ditfa.resumeThread", async () => {
-    view.reveal();
-    await controller.resumeThread();
-  });
-
   register("ditfa.interrupt", () => controller.interrupt());
 
-  register("ditfa.selectModel", async () => {
-    const registry = controller.providerRegistry;
-    if (!registry) {
-      void vscode.window.showWarningMessage("Ditfa is not connected yet.");
-      return;
-    }
-    const cwd = resolveWorkspaceRoot();
-    // Provider first: the model list only makes sense once the provider is known.
-    if (!(await pickProvider(registry, cwd))) {
-      return;
-    }
-    if (await pickModel(registry)) {
-      await offerRestartForNewSettings(controller);
-    }
-  });
-
   register("ditfa.selectProvider", async () => {
-    const registry = controller.providerRegistry;
-    if (!registry) {
-      void vscode.window.showWarningMessage("Ditfa is not connected yet.");
-      return;
-    }
-    if (await pickProvider(registry, resolveWorkspaceRoot())) {
-      await offerRestartForNewSettings(controller);
-    }
-  });
-
-  register("ditfa.selectApprovalMode", async () => {
-    if (await pickApprovalMode()) {
-      await offerRestartForNewSettings(controller);
+    const providers = await controller.providerChoices();
+    const current = controller.snapshot().header.provider;
+    const picked = await vscode.window.showQuickPick(
+      providers.map((provider) => ({
+        id: provider.id,
+        label: provider.name,
+        description: provider.id === current ? "$(check) current" : provider.kind === "local" ? "local" : undefined,
+        detail: provider.baseUrl ?? undefined,
+      })),
+      { title: "Ditfa: Select Provider", placeHolder: "Where should the agent's models come from?" },
+    );
+    if (picked && picked.id !== current) {
+      await controller.selectProvider(picked.id);
     }
   });
 
   register("ditfa.signIn", async () => {
-    const account = controller.accountManager;
-    if (!account) {
-      void vscode.window.showWarningMessage("Ditfa is not connected yet.");
-      return;
-    }
-    await account.signIn();
+    view.reveal();
+    await controller.setupProvider("ditfa");
   });
 
   register("ditfa.signOut", async () => {
+    await controller.connect();
     await controller.accountManager?.signOut();
   });
 
   register("ditfa.showAccount", async () => {
+    await controller.connect();
     const account = controller.accountManager;
     if (!account) {
-      void vscode.window.showWarningMessage("Ditfa is not connected yet.");
+      void vscode.window.showWarningMessage("The Ditfa engine is not running yet.");
       return;
     }
     const report = await account.describeUsage();
@@ -102,7 +79,7 @@ export function registerCommands(
       account.current.account ? "Sign out" : "Sign in",
     );
     if (choice === "Sign in") {
-      await account.signIn();
+      await controller.setupProvider("ditfa");
     } else if (choice === "Sign out") {
       await account.signOut();
     }
