@@ -2,7 +2,7 @@
   "name": "ditfa-code",
   "displayName": "Ditfa Code",
   "description": "The AI coding agent that shows its work. Tab autocomplete, any model, your own keys or a Ditfa plan, review and undo every change hunk by hunk, checkpoints without Git, and a sandbox the engine enforces.",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "publisher": "ditfa",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
