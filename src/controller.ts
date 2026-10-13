@@ -956,44 +956,129 @@ export class DitfaController implements vscode.Disposable {
       approvals,
       account,
       session.onEntry((entry) => this.entryEmitter.fire(entry)),
+      session.onRemoveEntry((id) => this.removeEmitter.fire(id)),
       session.onReset(() => this.stateEmitter.fire()),
       session.onPlan(({ plan, explanation }) =>
         this.patchEmitter.fire({ plan, planExplanation: explanation }),
       ),
-      session.onUsage((usage) => this.patchEmitter.fire({ tokenUsage: usage })),
+      session.onUsage((usage) => {
+        this.patchEmitter.fire({ tokenUsage: usage });
+        this.enforceBudget(session);
+      }),
       session.onTurnActiveChanged((active) => {
         this.patchEmitter.fire({ turnActive: active });
         this.updateStatusBar();
+        if (!active) {
+          clearTimeout(this.stopTimer);
+          this.approvals?.cancelAll();
+          void account.refreshRateLimits();
+        }
       }),
       session.onContextChanged(() => {
         this.pushHeader();
         this.updateStatusBar();
       }),
+      session.onFileChangeApplied((entry) => {
+        const skips = approvals.takeSkips(entry.id);
+        if (skips) {
+          void this.hunkReview.applySkips(entry, skips).then(() => this.tellAgentWhatWasLeftOut(session));
+        }
+      }),
+      session.onLoopDetected((command) => {
+        session.notice(`Stopped: the agent ran \`${command}\` six times in a row without progress.`, "warning");
+        void this.interrupt();
+      }),
       approvals.onChange((pending) => this.patchEmitter.fire({ approvals: pending })),
       account.onChange(() => {
+        void this.refreshProviderReady();
         this.pushHeader();
         this.updateStatusBar();
       }),
     );
 
-    await session.start(readSettings(), resolveWorkspaceRoot());
+    const defaults = await providers.configuredDefaults(resolveWorkspaceRoot());
+    this.configuredProvider = defaults.provider;
+    this.configuredModel = defaults.model;
+
+    await this.restoreLastThread(session);
     // Account state is a nicety; a failure here must not block the chat.
-    void account.refresh();
+    await account.refresh();
+    await this.refreshProviderReady();
+  }
+
+  /** Brings back the conversation that was open, so a reload loses nothing. */
+  private async restoreLastThread(session: ThreadSession): Promise<void> {
+    const threadId = this.context.workspaceState.get<string>(LAST_THREAD_KEY);
+    if (!threadId) {
+      return;
+    }
+    try {
+      await session.resume(threadId, this.effectiveSettings(), resolveWorkspaceRoot());
+    } catch (error) {
+      this.logger.info(`could not resume ${threadId}: ${error instanceof Error ? error.message : error}`);
+      session.clear();
+      await this.rememberThread(null);
+    }
+  }
+
+  private async rememberThread(threadId: string | null): Promise<void> {
+    await this.context.workspaceState.update(LAST_THREAD_KEY, threadId ?? undefined);
+  }
+
+  /** The engine died. Bring it back and resume, unless it keeps dying. */
+  private handleCrash(detail: string): void {
+    const now = Date.now();
+    this.crashTimes = this.crashTimes.filter((time) => now - time < RESTART_WINDOW_MS);
+    this.crashTimes.push(now);
+    this.teardownConnection();
+
+    if (this.crashTimes.length > MAX_RESTARTS) {
+      this.failConnection(detail || "The Ditfa engine keeps stopping unexpectedly.");
+      return;
+    }
+
+    const delay = 1000 * 2 ** (this.crashTimes.length - 1);
+    this.logger.warn(`engine stopped; restarting in ${delay}ms`);
+    this.connectionState = "starting";
+    this.pushHeader();
+    this.updateStatusBar();
+    this.restartTimer = setTimeout(() => {
+      void this.connect().then(() => {
+        this.session?.notice("The Ditfa engine restarted. Your conversation is intact.", "warning");
+      });
+    }, delay);
+  }
+
+  private async restartKeepingThread(message: string): Promise<void> {
+    await this.reconnect(message);
+    this.session?.notice(message, "warning");
+  }
+
+  private enforceBudget(session: ThreadSession): void {
+    const limit = readSettings().maxTokensPerTurn;
+    if (limit > 0 && !this.budgetTripped && session.turnActive && session.turnTokens > limit) {
+      this.budgetTripped = true;
+      session.notice(
+        `Stopped: this turn used more than the ${limit.toLocaleString()} token limit set in ditfa.maxTokensPerTurn.`,
+        "warning",
+      );
+      void this.interrupt();
+    }
   }
 
   private teardownConnection(): void {
+    clearTimeout(this.stopTimer);
     this.approvals?.cancelAll();
     this.client?.dispose();
     this.client = undefined;
+    for (const subscription of this.serviceSubscriptions) {
+      subscription.dispose();
+    }
+    this.serviceSubscriptions = [];
     this.session = undefined;
     this.approvals = undefined;
     this.account = undefined;
     this.providers = undefined;
-    // Service subscriptions were pushed here as a batch; drop them all so a
-    // reconnect does not double-fire events into the view.
-    while (this.subscriptions.length > 1) {
-      this.subscriptions.pop()?.dispose();
-    }
   }
 
   private failConnection(message: string): void {
@@ -1004,23 +1089,78 @@ export class DitfaController implements vscode.Disposable {
     this.updateStatusBar();
   }
 
+  private setInstallProgress(progress: InstallProgress): void {
+    this.install = progress;
+    this.pushHeader();
+  }
+
   /** Mirrors the connection state into a context key for `when` clauses. */
   private publishState(): void {
     void vscode.commands.executeCommand("setContext", "ditfa.state", this.connectionState);
   }
 
-  private async offerBinaryHelp(error: BinaryNotFoundError): Promise<void> {
-    const choice = await vscode.window.showErrorMessage(
-      describeMissingBinary(error),
-      { modal: true },
-      "Locate binary…",
-      "Show logs",
-    );
-    if (choice === "Locate binary…") {
-      await vscode.commands.executeCommand("ditfa.locateBinary");
-    } else if (choice === "Show logs") {
-      this.logger.show();
+  /** Settings with the mode a window with no folder is limited to. */
+  private effectiveSettings() {
+    const settings = readSettings();
+    if (settings.provider || !this.configuredProvider) {
+      return this.applyFolderLimit(settings);
     }
+    return this.applyFolderLimit({ ...settings, provider: this.configuredProvider });
+  }
+
+  /** Without a folder there is no workspace to sandbox writes into, so nothing is writable. */
+  private applyFolderLimit<T extends ReturnType<typeof readSettings>>(settings: T): T {
+    return workspaceRoots().length > 0 ? settings : { ...settings, ...settingsForMode("plan") };
+  }
+
+  private turnOptions(): TurnOptions {
+    const settings = this.effectiveSettings();
+    return {
+      settings,
+      sandboxPolicy: sandboxPolicyFor(settings.sandboxMode, workspaceRoots(), settings.allowNetwork),
+    };
+  }
+
+  private activeFileContext(): ActiveFileContext | null {
+    const info = this.activeEditor();
+    const editor = vscode.window.activeTextEditor;
+    return info && editor ? { path: info.path, line: editor.selection.active.line + 1 } : null;
+  }
+
+  private threadCwd(): string | undefined {
+    return this.session?.snapshot().context?.cwd ?? resolveWorkspaceRoot();
+  }
+
+  private effectiveProviderId(): string | null {
+    return (
+      readSettings().provider ||
+      this.session?.snapshot().context?.provider ||
+      this.configuredProvider ||
+      null
+    );
+  }
+
+  private async refreshProviderReady(): Promise<void> {
+    const id = this.effectiveProviderId();
+    const provider = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === id);
+    const signedIn = Boolean(this.account?.current.account);
+    let ready = signedIn;
+    if (!provider) {
+      // A custom provider from config.toml: the user has already set it up.
+      ready = Boolean(id) || signedIn;
+    } else if (provider.kind === "local") {
+      ready = true;
+    } else if (provider.envKey) {
+      ready =
+        signedIn ||
+        (await this.keys.has(provider.envKey)) ||
+        Boolean(process.env[provider.envKey]) ||
+        Boolean(readSettings().env[provider.envKey]);
+    }
+    if (ready !== this.providerReady) {
+      this.providerReady = ready;
+    }
+    this.pushHeader();
   }
 
   private lookupFileChanges(itemId: string): FileChangeSummary[] {
@@ -1054,26 +1194,34 @@ export class DitfaController implements vscode.Disposable {
     const settings = readSettings();
     const context = this.session?.snapshot().context ?? null;
     const accountView = this.account?.view();
+    const provider = this.effectiveProviderId();
+    const open = workspaceRoots().length > 0;
 
     return {
       connection: this.connectionState,
       connectionError: this.connectionError,
+      install: this.install,
       threadId: context?.threadId ?? null,
       threadName: context?.name ?? null,
       cwd: context?.cwd ?? resolveWorkspaceRoot() ?? null,
-      provider: context?.provider ?? (settings.provider || null),
-      model: context?.model ?? (settings.model || null),
-      reasoningEffort: context?.reasoningEffort ?? settings.reasoningEffort,
-      approvalPolicy: typeof settings.approvalPolicy === "string" ? settings.approvalPolicy : "granular",
-      sandboxMode: settings.sandboxMode,
+      workspaceOpen: open,
+      provider,
+      providerLabel: BUILT_IN_PROVIDERS.find((item) => item.id === provider)?.name ?? provider,
+      // The setting wins: it is what the next turn will actually use.
+      model: settings.model || context?.model || this.configuredModel,
+      reasoningEffort: settings.reasoningEffort ?? context?.reasoningEffort ?? null,
+      mode: open ? modeFromSettings(settings) : "plan",
       accountLabel: accountView?.label ?? null,
       planLabel: accountView?.planLabel ?? null,
       usagePercent: accountView?.usagePercent ?? null,
+      needsSetup: this.connectionState === "ready" && !this.providerReady,
     };
   }
 
   private pushHeader(): void {
-    this.patchEmitter.fire({ header: this.buildHeader() });
+    if (!this.disposed) {
+      this.patchEmitter.fire({ header: this.buildHeader() });
+    }
   }
 
   private updateStatusBar(): void {
@@ -1081,8 +1229,8 @@ export class DitfaController implements vscode.Disposable {
     const settings = readSettings();
     this.statusBar.update({
       connection: this.connectionState,
-      provider: context?.provider ?? (settings.provider || null),
-      model: context?.model ?? (settings.model || null),
+      provider: this.effectiveProviderId(),
+      model: settings.model || context?.model || this.configuredModel,
       turnActive: this.session?.turnActive ?? false,
       account: this.account?.view() ?? { label: null, planLabel: null, usagePercent: null },
     });
@@ -1091,5 +1239,13 @@ export class DitfaController implements vscode.Disposable {
   private extensionVersion(): string {
     const version = this.context.extension.packageJSON as { version?: string };
     return version.version ?? "0.0.0";
+  }
+}
+
+async function readText(path: string): Promise<string | null> {
+  try {
+    return await readFile(path, "utf8");
+  } catch {
+    return null;
   }
 }
