@@ -1,0 +1,66 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable"
+    ],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noImplicitOverride": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUncheckedIndexedAccess": true,
+    "forceConsistentCasingInFileNames": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "sourceMap": true,
+    "noEmit": true,
+    "paths": {
+      "@ditfa-ide/protocol": [
+        "./packages/protocol/src/index.ts"
+      ],
+      "@ditfa-ide/protocol/*": [
+        "./packages/protocol/src/*"
+      ],
+      "@ditfa-ide/contract": [
+        "./packages/contract/src/index.ts"
+      ],
+      "@ditfa-ide/contract/*": [
+        "./packages/contract/src/*"
+      ],
+      "@ditfa-ide/core": [
+        "./packages/core/src/index.ts"
+      ],
+      "@ditfa-ide/core/*": [
+        "./packages/core/src/*"
+      ],
+      "@ditfa-ide/cloud": [
+        "./packages/cloud/src/index.ts"
+      ],
+      "@ditfa-ide/cloud/*": [
+        "./packages/cloud/src/*"
+      ],
+      "@ditfa-ide/roundtable": [
+        "./packages/roundtable/src/index.ts"
+      ],
+      "@ditfa-ide/roundtable/*": [
+        "./packages/roundtable/src/*"
+      ],
+      "@ditfa-ide/webview": [
+        "./packages/webview/src/main.ts"
+      ],
+      "@ditfa-ide/webview/*": [
+        "./packages/webview/src/*"
+      ],
+      "@ditfa-ide/vscode/*": [
+        "./apps/vscode/src/*"
+      ]
+    }
+  }
+}
