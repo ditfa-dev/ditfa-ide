@@ -1,0 +1,15 @@
+.vscode/**
+node_modules/**
+src/**
+scripts/**
+tests/**
+out/**
+esbuild.mjs
+tsconfig.json
+**/*.map
+**/*.ts
+# Source art: only the generated tile and the activity icon ship.
+media/ditfa.png
+media/ditfa.svg
+!dist/**
+.gitignore
