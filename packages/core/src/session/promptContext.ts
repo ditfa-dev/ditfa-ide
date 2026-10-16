@@ -1,5 +1,5 @@
-import type { UserInput } from "../protocol";
-import type { ContextAttachment } from "./types";
+import type { UserInput } from "@ditfa-ide/protocol";
+import type { ContextAttachment } from "@ditfa-ide/contract";
 
 /**
  * Turns what the user attached into model input.

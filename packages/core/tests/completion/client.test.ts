@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
-import { CompletionError, forgetLearned, requestCompletion, type CompletionTarget } from "../../src/completion/client";
+import { CompletionError, forgetLearned, requestCompletion, type CompletionTarget } from "@ditfa-ide/core/completion/client";
 
 const request = { prefix: "const a = ", suffix: ";", language: "typescript", path: "a.ts", neighbors: [] };
 const signal = new AbortController().signal;

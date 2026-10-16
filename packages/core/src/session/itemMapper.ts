@@ -1,11 +1,11 @@
-import type { CommandAction, FileUpdateChange, ThreadItem } from "../protocol";
+import type { CommandAction, FileUpdateChange, ThreadItem } from "@ditfa-ide/protocol";
 import { parseUserText } from "./promptContext";
 import type {
   ChatEntry,
   CommandStatus,
   FileChangeSummary,
   PatchStatus,
-} from "./types";
+} from "@ditfa-ide/contract";
 
 /**
  * Projects an app-server `ThreadItem` onto the flatter shape the transcript

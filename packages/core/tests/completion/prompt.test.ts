@@ -9,7 +9,7 @@ import {
   supportsFim,
   takeWindow,
   worthSuggesting,
-} from "../../src/completion/prompt";
+} from "@ditfa-ide/core/completion/prompt";
 
 const clean = (raw: string, prefix = "", suffix = "", multiline = true, maxLines = 14) =>
   cleanCompletion(raw, { prefix, suffix, multiline, maxLines });

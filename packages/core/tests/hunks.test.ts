@@ -8,7 +8,7 @@ import {
   PatchApplyError,
   revertHunk,
   revertUnifiedDiff,
-} from "../src/diff/patch";
+} from "@ditfa-ide/core/diff/patch";
 
 const ORIGINAL = Array.from({ length: 30 }, (_, index) => `line ${index + 1}`).join("\n") + "\n";
 

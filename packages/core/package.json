@@ -1,0 +1,12 @@
+{
+  "name": "@ditfa-ide/core",
+  "version": "0.3.0",
+  "private": true,
+  "description": "Editor-independent logic of Ditfa Code: patches, checkpoints, transcripts, completion prompts.",
+  "license": "Apache-2.0",
+  "exports": {
+    ".": "./src/index.ts",
+    "./*": "./src/*.ts"
+  },
+  "sideEffects": false
+}

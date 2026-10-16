@@ -1,10 +1,10 @@
 import { mkdir, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-import type { Turn } from "../protocol";
-import type { Logger } from "../util/logger";
+import type { Turn } from "@ditfa-ide/protocol";
+import type { Logger } from "@ditfa-ide/core/logger";
 import { mapThreadItem } from "./itemMapper";
-import type { ChatEntry, PlanStep, TokenUsageView } from "./types";
+import type { ChatEntry, PlanStep, TokenUsageView } from "@ditfa-ide/contract";
 
 /**
  * Keeps each thread's rendered transcript on disk.

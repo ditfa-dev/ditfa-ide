@@ -5,8 +5,8 @@ import { chmod, mkdir, readdir, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { promisify } from "node:util";
 
-import type { InstallProgress } from "../session/types";
-import type { Logger } from "../util/logger";
+import type { InstallProgress } from "@ditfa-ide/contract";
+import type { Logger } from "@ditfa-ide/core/logger";
 
 /**
  * Installs the ditfa engine for users who have never heard of a CLI.

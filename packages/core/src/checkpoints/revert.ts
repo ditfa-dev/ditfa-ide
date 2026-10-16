@@ -1,7 +1,7 @@
 import { isAbsolute, join } from "node:path";
 
-import { effectiveDiff, PatchApplyError, revertUnifiedDiff } from "../diff/patch";
-import type { FileChangeSummary } from "../session/types";
+import { effectiveDiff, PatchApplyError, revertUnifiedDiff } from "@ditfa-ide/core/diff/patch";
+import type { FileChangeSummary } from "@ditfa-ide/contract";
 
 /**
  * Works out how to undo a run of applied file changes.

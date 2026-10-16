@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { applyUnifiedDiff, PatchApplyError, revertUnifiedDiff } from "../src/diff/patch";
+import { applyUnifiedDiff, PatchApplyError, revertUnifiedDiff } from "@ditfa-ide/core/diff/patch";
 
 const ORIGINAL = ["one", "two", "three", "four", "five"].join("\n") + "\n";
 

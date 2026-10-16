@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { buildUserInput, parseUserText } from "../src/session/promptContext";
+import { buildUserInput, parseUserText } from "@ditfa-ide/core/session/promptContext";
 
 describe("buildUserInput", () => {
   it("puts attached files in the text, because the core drops mention inputs", () => {
