@@ -13,7 +13,7 @@ import type {
   SlashCommand,
   ThreadSummary,
   WebviewMessage,
-} from "../src/session/types";
+} from "@ditfa-ide/contract";
 import {
   commandOutputHtml,
   commandStatusLabel,

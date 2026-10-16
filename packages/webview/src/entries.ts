@@ -1,11 +1,11 @@
-import { hunkStats, listHunks, type DiffHunk } from "../src/diff/patch";
+import { hunkStats, listHunks, type DiffHunk } from "@ditfa-ide/core/diff/patch";
 import type {
   ApprovalRequest,
   ChatEntry,
   CommandEntry,
   FileChangeEntry,
   FileChangeSummary,
-} from "../src/session/types";
+} from "@ditfa-ide/contract";
 import { icons } from "./icons";
 import { escapeHtml, renderMarkdown, stripAnsi, token, whole } from "./markdown";
 
