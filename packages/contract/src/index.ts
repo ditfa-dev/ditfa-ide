@@ -16,7 +16,8 @@ export type EntryKind =
   | "plan"
   | "turnStats"
   | "notice"
-  | "error";
+  | "error"
+  | "roundtable";
 
 export type CommandStatus = "running" | "completed" | "failed" | "aborted";
 export type PatchStatus = "pending" | "applied" | "failed" | "aborted";
@@ -65,6 +66,8 @@ export interface AssistantEntry extends EntryBase {
   kind: "assistant";
   text: string;
   streaming: boolean;
+  /** The mode of the turn that wrote it; a Plan-mode answer gets Save, Download and Implement. */
+  mode?: ChatMode;
 }
 
 export interface ReasoningEntry extends EntryBase {
@@ -133,6 +136,67 @@ export interface ErrorEntry extends EntryBase {
   retrying: boolean;
   /** The one thing that would actually fix this, when there is one. */
   action?: ErrorAction | null;
+}
+
+/** One model at the round table, as its lane shows it. */
+export interface RoundTableLane {
+  participantId: string;
+  /** "A", "B"… while the table is anonymous; the model's name once it is revealed (and always in team mode). */
+  label: string;
+  model: string;
+  provider: string;
+  isLeader: boolean;
+  status: "waiting" | "thinking" | "done" | "failed";
+  /** What it is doing now: "Proposal", "Critique, round 1", "Ranking", a subtask title… */
+  task: string;
+  /** The latest text it wrote. */
+  text: string;
+  error: string | null;
+  outputTokens: number;
+}
+
+export interface RoundTableSubtask {
+  id: string;
+  title: string;
+  /** Lane label of the model it went to. */
+  assignee: string | null;
+  /** Why that model: its best skills for this subtask. */
+  reason: string | null;
+  status: "pending" | "running" | "reviewing" | "revising" | "done" | "failed";
+}
+
+export interface RoundTableEntry extends EntryBase {
+  kind: "roundtable";
+  mode: "review" | "team";
+  motion: string;
+  status: "running" | "completed" | "stopped" | "failed";
+  /** Human-readable current step: "Proposals", "Critique · round 2", "Final answer"… */
+  phase: string;
+  lanes: RoundTableLane[];
+  subtasks: RoundTableSubtask[];
+  /** Peer ranking (review mode), best first. */
+  rankings: { label: string; score: number }[];
+  /** The leader's synthesis (review) or integrated deliverable (team), streamed. */
+  final: string;
+  /** Who wrote what is shown: after a review ends, and always in team mode. */
+  revealed: boolean;
+  usage: { outputTokens: number; estimated: boolean };
+  endedBy: "completed" | "budget" | "aborted" | "insufficientParticipants" | null;
+  /** The Markdown report, once the table is done. */
+  report: string | null;
+}
+
+/** A model the round table can seat. */
+export interface RoundTableOption {
+  /** `provider:model` */
+  ref: string;
+  label: string;
+  provider: string;
+  providerLabel: string;
+  source: "subscription" | "apiKey" | "local";
+  /** 0..100, from benchmark-based estimates: the leader is the strongest one seated. */
+  score: number;
+  strengths: string[];
 }
 
 export type ChatEntry =
