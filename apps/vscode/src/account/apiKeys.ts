@@ -21,6 +21,11 @@ export class ApiKeys {
     return this.secrets.get(PREFIX + envKey);
   }
 
+  async delete(envKey: string): Promise<void> {
+    await this.secrets.delete(PREFIX + envKey);
+    this.names.delete(envKey);
+  }
+
   async has(envKey: string): Promise<boolean> {
     return Boolean(await this.get(envKey));
   }
