@@ -7,6 +7,11 @@
  * needs as a lookup: given a method name, what goes in and what comes back.
  */
 import type { InitializeParams } from "./generated/InitializeParams";
+import type { ConfigValueWriteParams } from "./generated/v2/ConfigValueWriteParams";
+import type { ConfigWriteResponse } from "./generated/v2/ConfigWriteResponse";
+import type { ListMcpServerStatusParams } from "./generated/v2/ListMcpServerStatusParams";
+import type { ListMcpServerStatusResponse } from "./generated/v2/ListMcpServerStatusResponse";
+import type { McpServerRefreshResponse } from "./generated/v2/McpServerRefreshResponse";
 import type { InitializeResponse } from "./generated/InitializeResponse";
 import type { FuzzyFileSearchParams } from "./generated/FuzzyFileSearchParams";
 import type { FuzzyFileSearchResponse } from "./generated/FuzzyFileSearchResponse";
@@ -136,6 +141,9 @@ export interface RequestMap {
 
   "model/list": { params: ModelListParams; result: ModelListResponse };
   "config/read": { params: ConfigReadParams; result: ConfigReadResponse };
+  "config/value/write": { params: ConfigValueWriteParams; result: ConfigWriteResponse };
+  "config/mcpServer/reload": { params: undefined; result: McpServerRefreshResponse };
+  "mcpServerStatus/list": { params: ListMcpServerStatusParams; result: ListMcpServerStatusResponse };
   "permissionProfile/list": {
     params: PermissionProfileListParams;
     result: PermissionProfileListResponse;
