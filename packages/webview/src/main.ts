@@ -71,6 +71,9 @@ const PERMISSIONS: { id: PermissionLevel; label: string; detail: string; icon: s
   { id: "full", label: "Full access", detail: "No sandbox and no questions. Disposable machines only.", icon: icons.warn },
 ];
 
+/** Rows of the mode menu, in order: the three modes, then (in Agent mode) the three permission levels. */
+type ModeRow = { kind: "mode"; id: ChatMode } | { kind: "permission"; id: PermissionLevel };
+
 const STARTERS = [
   "Explain how this project is structured",
   "Find the most likely bug in this codebase",
@@ -94,11 +97,26 @@ const state: SessionState = {
     providerLabel: null,
     model: null,
     reasoningEffort: null,
-    mode: "auto",
+    chatMode: "agent",
+    permission: "auto",
     accountLabel: null,
     planLabel: null,
     usagePercent: null,
     needsSetup: false,
+    ditfa: {
+      signedIn: false,
+      signInStep: "idle",
+      name: null,
+      email: null,
+      avatarUrl: null,
+      plan: null,
+      planLabel: null,
+      modelsIncluded: null,
+      credits: null,
+      upgrade: null,
+    },
+    modelCapabilities: null,
+    voice: { dictation: false, conversation: false, reason: null, upgradeUrl: null },
   },
   entries: [],
   plan: [],
@@ -107,7 +125,20 @@ const state: SessionState = {
   turnActive: false,
   approvals: [],
   showReasoning: true,
+  queue: [],
+  queuePaused: false,
 };
+
+let voice: VoiceView = {
+  active: false,
+  mode: null,
+  phase: "idle",
+  level: 0,
+  transcript: "",
+  error: null,
+  source: null,
+};
+let editing: string | null = null;
 
 /** Rendered rows, so a delta touches one row instead of the transcript. */
 const entryNodes = new Map<string, HTMLElement>();
@@ -147,14 +178,18 @@ root.innerHTML = `
     <div class="popover" id="popover" hidden></div>
     <div class="plan" id="plan" hidden></div>
     <div class="changes" id="changes" hidden></div>
+    <div class="banner" id="banner" hidden></div>
+    <div class="queue" id="queue" hidden></div>
     <div class="composer" id="composer-box">
       <div class="chips-row" id="attachments"></div>
       <textarea id="composer" rows="1" dir="auto" placeholder="Ask Ditfa to build, explain, or fix something"></textarea>
-      <div class="toolbar">
+      <div class="voice-bar" id="voice-bar" hidden></div>
+      <div class="toolbar" id="toolbar">
         <button class="tool" id="attach" type="button" title="Attach a file (@)">${icons.at}</button>
         <button class="tool mode" id="mode-button" type="button"></button>
         <span class="spacer"></span>
         <button class="ring" id="ring" type="button" hidden></button>
+        <button class="tool" id="roundtable-button" type="button" title="Round table: several models on one question">${icons.table}</button>
         <button class="tool model" id="model-button" type="button"></button>
         <button class="send" id="send" type="button" title="Send">${icons.send}</button>
       </div>
