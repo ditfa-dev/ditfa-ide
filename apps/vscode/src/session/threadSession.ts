@@ -8,12 +8,14 @@ import type {
   TurnError,
   UserInput,
 } from "@ditfa-ide/protocol";
+import type { JsonValue } from "@ditfa-ide/protocol/generated/serde_json/JsonValue";
 import type { Logger } from "@ditfa-ide/vscode/util/logger";
 import type { DitfaSettings } from "@ditfa-ide/vscode/util/settings";
 import { mapThreadItem } from "@ditfa-ide/core/session/itemMapper";
 import { mergeTranscript, type TranscriptStore } from "@ditfa-ide/core/session/transcriptStore";
 import type {
   ChatEntry,
+  ChatMode,
   ErrorAction,
   FileChangeEntry,
   FileChangeSummary,
@@ -43,6 +45,7 @@ export interface SessionSnapshot {
 export interface TurnOptions {
   settings: DitfaSettings;
   sandboxPolicy: SandboxPolicy;
+  mode: ChatMode;
 }
 
 /** Output kept per command. A build log must not become the extension's memory use. */
@@ -79,6 +82,12 @@ export class ThreadSession implements vscode.Disposable {
   /** The last fatal error, so `turn/completed` repeating it does not add a second card. */
   private lastErrorMessage: string | null = null;
   private lastUserMessage: { text: string; input: UserInput[] } | null = null;
+  /** What each turn was started with, so Retry can send exactly that again (attachments included). */
+  private readonly turnInputs = new Map<string, UserInput[]>();
+  private readonly turnModes = new Map<string, ChatMode>();
+  /** How the latest turn ended: the queue holds back after a failure or a Stop. */
+  private lastStatus: "completed" | "failed" | "interrupted" | null = null;
+  private pendingMode: ChatMode = "agent";
   private commandCounts = new Map<string, number>();
   private clientMessageCounter = 0;
   /** Things the agent should hear with the next message, such as hunks the user undid. */

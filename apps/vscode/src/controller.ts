@@ -2,7 +2,10 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as vscode from "vscode";
 
+import { contextWindowTokens, planLabel, type VoiceConfig } from "@ditfa-ide/cloud";
 import { AccountManager } from "@ditfa-ide/vscode/account/accountManager";
+import { DitfaAccount, DITFA_TOOLS_ENV } from "@ditfa-ide/vscode/account/ditfaAccount";
+import { RoundTableService } from "@ditfa-ide/vscode/roundtable/roundTableService";
 import { ApiKeys } from "@ditfa-ide/vscode/account/apiKeys";
 import { DitfaStatusBar } from "@ditfa-ide/vscode/account/statusBar";
 import { ApprovalService } from "@ditfa-ide/vscode/approvals/approvalService";
@@ -26,19 +29,24 @@ import {
   ProviderRegistry,
   type ProviderInfo,
 } from "@ditfa-ide/vscode/providers/providerRegistry";
+import { MessageQueue } from "@ditfa-ide/core/session/messageQueue";
+import { IMPLEMENT_PLAN_PROMPT, modeNote, planFileName } from "@ditfa-ide/core/session/modes";
 import { buildUserInput, type ActiveFileContext } from "@ditfa-ide/core/session/promptContext";
 import { ThreadSession, type TurnOptions } from "@ditfa-ide/vscode/session/threadSession";
 import { TranscriptStore } from "@ditfa-ide/core/session/transcriptStore";
+import type { UserInput } from "@ditfa-ide/protocol";
 import type {
   ActiveEditorInfo,
-  AgentMode,
   ChatEntry,
+  ChatMode,
   ConnectionState,
   ContextAttachment,
   ErrorAction,
   FileChangeSummary,
   FileSuggestion,
+  DitfaAccountHeader,
   InstallProgress,
+  ModelCapabilitiesView,
   ModelCatalog,
   SessionHeader,
   SessionState,
