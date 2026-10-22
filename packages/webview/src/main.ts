@@ -1,17 +1,21 @@
 import type {
   ActiveEditorInfo,
-  AgentMode,
   ApprovalAnswer,
   ChatEntry,
+  ChatMode,
   ContextAttachment,
   FileChangeSummary,
   FileSuggestion,
   HostMessage,
   ModelCatalog,
+  ModelChoice,
+  PermissionLevel,
+  RoundTableOption,
   SessionState,
   SetupOption,
   SlashCommand,
   ThreadSummary,
+  VoiceView,
   WebviewMessage,
 } from "@ditfa-ide/contract";
 import {
@@ -25,9 +29,10 @@ import {
   timeAgo,
   type RenderContext,
 } from "./entries";
-import { icons } from "./icons";
+import { icons, sparkle } from "./icons";
 import { escapeHtml, renderMarkdown, token, whole } from "./markdown";
 import { markSvg } from "./mark";
+import { createVoiceIo } from "./voice";
 
 declare function acquireVsCodeApi(): {
   postMessage(message: WebviewMessage): void;
@@ -44,10 +49,23 @@ type Popover =
   | { kind: "files"; items: FileSuggestion[]; index: number }
   | { kind: "slash"; items: SlashCommand[]; index: number }
   | { kind: "modes"; index: number }
-  | { kind: "models"; catalog: ModelCatalog | null; index: number; filter: string };
+  | { kind: "models"; catalog: ModelCatalog | null; index: number; filter: string }
+  | {
+      kind: "roundtable";
+      options: RoundTableOption[] | null;
+      selected: string[];
+      mode: "review" | "team";
+      error: string | null;
+      note: string | null;
+    };
 
-const MODES: { id: AgentMode; label: string; detail: string; icon: string }[] = [
-  { id: "plan", label: "Plan", detail: "Reads and plans. Writing is blocked by the sandbox.", icon: icons.plan },
+const CHAT_MODES: { id: ChatMode; label: string; detail: string; icon: string }[] = [
+  { id: "chat", label: "Chat", detail: "Answers and explains. Read-only.", icon: icons.chat },
+  { id: "plan", label: "Plan", detail: "Explores and writes a plan you can save or carry out. Read-only.", icon: icons.plan },
+  { id: "agent", label: "Agent", detail: "Does the work: edits files and runs commands.", icon: icons.agent },
+];
+
+const PERMISSIONS: { id: PermissionLevel; label: string; detail: string; icon: string }[] = [
   { id: "ask", label: "Ask first", detail: "Asks before every edit and command.", icon: icons.shield },
   { id: "auto", label: "Auto", detail: "Works inside this workspace; asks to step outside it.", icon: icons.bolt },
   { id: "full", label: "Full access", detail: "No sandbox and no questions. Disposable machines only.", icon: icons.warn },
