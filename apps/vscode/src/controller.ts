@@ -48,19 +48,25 @@ import type {
   InstallProgress,
   ModelCapabilitiesView,
   ModelCatalog,
+  ModelChoice,
+  PermissionLevel,
+  QueuedMessage,
   SessionHeader,
   SessionState,
   SetupOption,
   SlashCommand,
   ThreadSummary,
+  VoiceAvailability,
 } from "@ditfa-ide/contract";
 import type { Logger } from "@ditfa-ide/vscode/util/logger";
 import {
-  modeFromSettings,
+  permissionFromSettings,
+  READ_ONLY,
   readSettings,
   resolveWorkspaceRoot,
   sandboxPolicyFor,
-  settingsForMode,
+  settingsForPermission,
+  settingsForTurn,
   updateSetting,
   workspaceRoots,
 } from "@ditfa-ide/vscode/util/settings";
@@ -71,6 +77,15 @@ const MAX_RESTARTS = 3;
 const RESTART_WINDOW_MS = 120_000;
 /** How long a turn gets to honor Stop before the engine is restarted under it. */
 const STOP_DEADLINE_MS = 6_000;
+
+/** What a queued message needs to be sent later: built when it was typed, with the file in view then. */
+interface QueuedPayload {
+  input: UserInput[];
+  attachments: string[];
+  mode: ChatMode;
+}
+
+type RewindPurpose = "restore" | "edit" | "retry";
 
 const BUILTIN_COMMANDS: SlashCommand[] = [
   { id: "new", label: "new", detail: "Start a new conversation", kind: "builtin" },
@@ -114,6 +129,22 @@ export class DitfaController implements vscode.Disposable {
   private providerReady = false;
 
   private readonly keys: ApiKeys;
+  /** The Ditfa account: browser sign-in, plan, usage, and the keys the engine runs with. */
+  readonly ditfa: DitfaAccount;
+  /** Several models on one motion; their result goes to the agent, never straight to files. */
+  readonly roundTable: RoundTableService;
+  private ditfaSignedIn = false;
+  private voiceConfig: VoiceConfig | null = null;
+  private readonly queue = new MessageQueue<QueuedPayload>();
+  /** Capabilities of the models the last catalog listed, for the composer's controls. */
+  private readonly modelCaps = new Map<string, ModelCapabilitiesView>();
+  /** The first Ditfa model the plan includes: what quick fixes and Tab use before a model is picked. */
+  private defaultDitfaModel: string | null = null;
+  /** The user pressed Stop on the running turn: the queue waits instead of sending the next message. */
+  private stopRequested = false;
+  private panelVisible: () => boolean = () => false;
+  /** Callers waiting for the running turn to end (voice mode), with its answer. */
+  private turnWaiters: ((answer: string | null) => void)[] = [];
   private readonly store: TranscriptStore;
   private readonly diffs: DiffService;
   private readonly hunkReview: HunkReview;
@@ -129,6 +160,8 @@ export class DitfaController implements vscode.Disposable {
   private readonly removeEmitter = new vscode.EventEmitter<string>();
   private readonly composerEmitter = new vscode.EventEmitter<string>();
   private readonly editorEmitter = new vscode.EventEmitter<ActiveEditorInfo | null>();
+  private readonly queueEmitter = new vscode.EventEmitter<{ queue: QueuedMessage[]; paused: boolean }>();
+  private readonly chimeEmitter = new vscode.EventEmitter<void>();
 
   /** Fires when the whole state should be re-pushed (connect, reset, new thread). */
   readonly onDidResetState = this.stateEmitter.event;
@@ -140,6 +173,9 @@ export class DitfaController implements vscode.Disposable {
   /** Fires with text the composer should hold, such as a message that was rewound. */
   readonly onDidSetComposer = this.composerEmitter.event;
   readonly onDidChangeActiveEditor = this.editorEmitter.event;
+  readonly onDidChangeQueue = this.queueEmitter.event;
+  /** A turn finished while the panel was on screen: play the short sound, if it is enabled. */
+  readonly onDidChime = this.chimeEmitter.event;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
