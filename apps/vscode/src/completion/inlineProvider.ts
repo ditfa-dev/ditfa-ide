@@ -44,7 +44,7 @@ const MAX_LINES_IN_FILE = 30_000;
 function readSettings(): CompletionSettings {
   const config = vscode.workspace.getConfiguration("ditfa");
   return {
-    enabled: config.get<boolean>("completion.enabled", false),
+    enabled: config.get<boolean>("completion.enabled", true),
     debounceMs: Math.max(0, config.get<number>("completion.debounceMs", 300)),
     maxTokens: Math.min(1024, Math.max(16, config.get<number>("completion.maxTokens", 128))),
     multiline: config.get<boolean>("completion.multiline", true),
@@ -167,7 +167,7 @@ export class CompletionService implements vscode.InlineCompletionItemProvider, v
 
     const resolved = await this.host.resolveTarget();
     if (!resolved.ok) {
-      this.explain(resolved.reason, resolved.message);
+      this.explain(resolved.reason, resolved.message, resolved.provider?.id ?? null);
       return undefined;
     }
     if (token.isCancellationRequested) {
