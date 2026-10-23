@@ -37,6 +37,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   /** Messages for a composer that does not exist yet, sent once the view says it is ready. */
   private queued: HostMessage[] = [];
   private viewReady = false;
+  /** Voice messages go to the voice service once one is attached (see `setVoiceHandler`). */
+  private voiceHandler: ((message: WebviewMessage) => Promise<void>) | null = null;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -49,6 +51,8 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
       controller.onDidRemoveEntry((id) => this.post({ type: "entryRemove", id })),
       controller.onDidSetComposer((text) => this.post({ type: "composerSet", text })),
       controller.onDidChangeActiveEditor((editor) => this.post({ type: "activeEditor", editor })),
+      controller.onDidChangeQueue(({ queue, paused }) => this.post({ type: "queue", queue, paused })),
+      controller.onDidChime(() => this.post({ type: "chime" })),
       controller.onDidPatchState((patch) => {
         if (patch.header) {
           this.post({ type: "header", header: patch.header });
