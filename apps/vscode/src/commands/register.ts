@@ -4,6 +4,7 @@ import type { DitfaController } from "@ditfa-ide/vscode/controller";
 import type { ContextAttachment } from "@ditfa-ide/contract";
 import type { ChatViewProvider } from "@ditfa-ide/vscode/ui/chatViewProvider";
 import type { Logger } from "@ditfa-ide/vscode/util/logger";
+import { problemInfo, runQuickFix } from "@ditfa-ide/vscode/ui/quickFix";
 import { resolveWorkspaceRoot, updateSetting } from "@ditfa-ide/vscode/util/settings";
 
 export function registerCommands(
@@ -57,12 +58,11 @@ export function registerCommands(
 
   register("ditfa.signIn", async () => {
     view.reveal();
-    await controller.setupProvider("ditfa");
+    await controller.signIn();
   });
 
   register("ditfa.signOut", async () => {
-    await controller.connect();
-    await controller.accountManager?.signOut();
+    await controller.signOut();
   });
 
   register("ditfa.showAccount", async () => {
