@@ -1,12 +1,14 @@
 import { hunkStats, listHunks, type DiffHunk } from "@ditfa-ide/core/diff/patch";
+import { diffRows, type Segment } from "@ditfa-ide/core/diff/rows";
 import type {
   ApprovalRequest,
   ChatEntry,
   CommandEntry,
   FileChangeEntry,
   FileChangeSummary,
+  RoundTableEntry,
 } from "@ditfa-ide/contract";
-import { icons } from "./icons";
+import { icons, sparkle } from "./icons";
 import { escapeHtml, renderMarkdown, stripAnsi, token, whole } from "./markdown";
 
 /**
@@ -20,6 +22,31 @@ export interface RenderContext {
   /** Code blocks per entry, for the copy buttons. */
   codeBlocks: Map<string, string[]>;
   turnActive: boolean;
+  /** The user message being edited in place, if any. */
+  editing?: string | null;
+}
+
+/** Copy, Edit and Back under a user message; Copy and Retry under an answer. Between turns only. */
+function userActions(entryId: string, turnId: string | null | undefined, ctx: RenderContext): string {
+  const copy = `<button class="row-icon" type="button" data-copy-entry="${escapeHtml(entryId)}" title="Copy" aria-label="Copy">${icons.copy}</button>`;
+  if (!turnId || ctx.turnActive) {
+    return `<div class="row-actions">${copy}</div>`;
+  }
+  const turn = escapeHtml(turnId);
+  return `<div class="row-actions">
+      ${copy}
+      <button class="row-icon" type="button" data-edit-entry="${escapeHtml(entryId)}" title="Edit and send again" aria-label="Edit">${icons.pencil}</button>
+      <button class="row-icon" type="button" data-restore="${turn}" title="Back: restore the code and the conversation to before this message" aria-label="Back to before this message">${icons.undo}</button>
+    </div>`;
+}
+
+function planActions(entryId: string): string {
+  const id = escapeHtml(entryId);
+  return `<div class="plan-actions">
+      <button class="primary small" type="button" data-plan-action="implement" data-plan-entry="${id}">${icons.play}<span>Implement</span></button>
+      <button class="ghost-button" type="button" data-plan-action="save" data-plan-entry="${id}">${icons.save}<span>Save to project</span></button>
+      <button class="ghost-button" type="button" data-plan-action="download" data-plan-entry="${id}">${icons.download}<span>Download</span></button>
+    </div>`;
 }
 
 export function renderEntry(entry: ChatEntry, ctx: RenderContext): string | null {
@@ -28,10 +55,17 @@ export function renderEntry(entry: ChatEntry, ctx: RenderContext): string | null
       const chips = entry.attachments
         .map((label) => `<span class="mini-chip">${escapeHtml(label)}</span>`)
         .join("");
-      const restore =
-        entry.turnId && !ctx.turnActive
-          ? `<button class="row-action" type="button" data-restore="${escapeHtml(entry.turnId)}" title="Go back to before this message">${icons.undo}<span>Restore</span></button>`
-          : "";
+      if (ctx.editing === entry.id && entry.turnId) {
+        return `
+          <div class="bubble editing">
+            <textarea class="edit-input" dir="auto" data-edit-input="${escapeHtml(entry.id)}" rows="3">${escapeHtml(entry.text)}</textarea>
+            <div class="edit-actions">
+              <span class="edit-note">Sending rewinds the conversation and the code to this point.</span>
+              <button class="ghost-button" type="button" data-edit-cancel>Cancel</button>
+              <button class="primary small" type="button" data-edit-send="${escapeHtml(entry.turnId)}" data-edit-entry-id="${escapeHtml(entry.id)}">Send</button>
+            </div>
+          </div>`;
+      }
       return `
         <div class="bubble" dir="auto">
           <div class="entry-text">${escapeHtml(entry.text).replace(/\n/g, "<br />")}</div>
