@@ -71,13 +71,21 @@ export function renderEntry(entry: ChatEntry, ctx: RenderContext): string | null
           <div class="entry-text">${escapeHtml(entry.text).replace(/\n/g, "<br />")}</div>
           ${chips ? `<div class="chips">${chips}</div>` : ""}
         </div>
-        ${restore}`;
+        ${userActions(entry.id, entry.turnId, ctx)}`;
     }
 
     case "assistant": {
       const rendered = renderMarkdown(entry.text);
       ctx.codeBlocks.set(entry.id, rendered.codeBlocks);
-      return `<div class="markdown" dir="auto">${rendered.html}</div>`;
+      const done = !entry.streaming && entry.text.trim().length > 0;
+      const actions = done
+        ? `<div class="row-actions assistant-actions">
+            <button class="row-icon" type="button" data-copy-entry="${escapeHtml(entry.id)}" title="Copy" aria-label="Copy">${icons.copy}</button>
+            ${entry.turnId && !ctx.turnActive ? `<button class="row-icon" type="button" data-retry="${escapeHtml(entry.turnId)}" title="Ask again" aria-label="Ask again">${icons.retry}</button>` : ""}
+          </div>`
+        : "";
+      const plan = done && entry.mode === "plan" ? planActions(entry.id) : "";
+      return `<div class="markdown" dir="auto">${rendered.html}</div>${plan}${actions}`;
     }
 
     case "reasoning": {
@@ -133,7 +141,7 @@ export function renderEntry(entry: ChatEntry, ctx: RenderContext): string | null
     case "plan": {
       const rendered = renderMarkdown(entry.text);
       ctx.codeBlocks.set(entry.id, rendered.codeBlocks);
-      return `<div class="plan-doc"><div class="plan-doc-head">${icons.plan}<span>Plan</span></div><div class="markdown" dir="auto">${rendered.html}</div></div>`;
+      return `<div class="plan-doc"><div class="plan-doc-head">${icons.plan}<span>Plan</span></div><div class="markdown" dir="auto">${rendered.html}</div>${ctx.turnActive ? "" : planActions(entry.id)}</div>`;
     }
 
     case "turnStats": {
@@ -147,6 +155,9 @@ export function renderEntry(entry: ChatEntry, ctx: RenderContext): string | null
     case "notice":
       return `<div class="notice notice-${token(entry.tone)}">${escapeHtml(entry.text)}</div>`;
 
+    case "roundtable":
+      return renderRoundTable(entry, ctx);
+
     case "error": {
       const action = entry.action ? ERROR_ACTIONS[entry.action] : null;
       return `
@@ -157,6 +168,99 @@ export function renderEntry(entry: ChatEntry, ctx: RenderContext): string | null
         </div>`;
     }
   }
+}
+
+const SUBTASK_STATUS: Record<string, string> = {
+  pending: "waiting",
+  running: "working",
+  reviewing: "in review",
+  revising: "revising",
+  done: "done",
+  failed: "failed",
+};
+
+/** The last part of a lane's text: lanes stream, and the newest lines are the ones worth watching. */
+function laneTail(text: string, max = 900): string {
+  const trimmed = text.trim();
+  return trimmed.length > max ? `…${trimmed.slice(-max)}` : trimmed;
+}
+
+/**
+ * The round table as one card: a live lane per model, the plan and who took each part (team mode), the peer
+ * ranking (review mode), and the leader's final answer with the way to act on it.
+ */
+function renderRoundTable(entry: RoundTableEntry, ctx: RenderContext): string {
+  const running = entry.status === "running";
+  const id = escapeHtml(entry.id);
+  const lanes = entry.lanes
+    .map((lane) => {
+      const key = `rt:${entry.id}:${lane.participantId}`;
+      const open = ctx.expanded.has(key);
+      const initial = escapeHtml((lane.label.trim()[0] ?? "?").toUpperCase());
+      const body = open ? lane.text.trim() : laneTail(lane.text);
+      return `
+        <div class="rt-lane rt-${token(lane.status)}${lane.isLeader ? " leader" : ""}">
+          <button class="rt-lane-head" type="button" data-toggle="${escapeHtml(key)}" data-toggle-entry="${id}" aria-expanded="${open}">
+            <span class="rt-avatar">${initial}</span>
+            <span class="rt-name" title="${entry.revealed ? escapeHtml(`${lane.model} · ${lane.provider}`) : "Anonymous until the table ends"}">${escapeHtml(lane.label)}</span>
+            ${lane.isLeader ? `<span class="rt-leader" title="The strongest model at the table leads it">Leader</span>` : ""}
+            <span class="rt-task">${lane.status === "thinking" ? sparkle("Thinking", 11) : ""}${escapeHtml(lane.task)}</span>
+          </button>
+          ${body ? `<div class="rt-lane-body${open ? " open" : ""}" dir="auto">${escapeHtml(body)}</div>` : `<div class="rt-lane-body empty">${lane.status === "waiting" ? "Waiting for its turn" : ""}</div>`}
+          ${lane.error ? `<div class="rt-error">${escapeHtml(lane.error)}</div>` : ""}
+        </div>`;
+    })
+    .join("");
+
+  const subtasks = entry.subtasks.length
+    ? `<ol class="rt-subtasks">${entry.subtasks
+        .map(
+          (subtask) => `
+          <li class="rt-st-${token(subtask.status)}">
+            <span class="rt-st-title" dir="auto">${escapeHtml(subtask.title)}</span>
+            <small>${escapeHtml(subtask.assignee ?? "unassigned")}${subtask.reason ? ` · ${escapeHtml(subtask.reason)}` : ""}</small>
+            <span class="rt-st-status">${escapeHtml(SUBTASK_STATUS[subtask.status] ?? subtask.status)}</span>
+          </li>`,
+        )
+        .join("")}</ol>`
+    : "";
+
+  const rankings = entry.rankings.length
+    ? `<div class="rt-rankings"><span class="rt-rankings-title">Peer ranking</span>${entry.rankings
+        .map((ranking, index) => `<span class="rt-rank">${whole(index + 1)}. ${escapeHtml(ranking.label)} <small>${whole(ranking.score)}</small></span>`)
+        .join("")}</div>`
+    : "";
+
+  let final = "";
+  if (entry.final.trim()) {
+    const rendered = renderMarkdown(entry.final);
+    ctx.codeBlocks.set(entry.id, rendered.codeBlocks);
+    final = `<div class="rt-final"><div class="rt-final-head">${icons.sparkles}<span>${entry.mode === "team" ? "What the team delivered" : "The table's answer"}</span></div><div class="markdown" dir="auto">${rendered.html}</div></div>`;
+  }
+
+  const actions = running
+    ? ""
+    : `<div class="rt-actions">
+        ${entry.final.trim() ? `<button class="primary small" type="button" data-rt-action="implement" data-rt-entry="${id}">${icons.play}<span>Implement with the agent</span></button><button class="ghost-button" type="button" data-rt-action="copy" data-rt-entry="${id}">Copy</button>` : ""}
+        <button class="ghost-button" type="button" data-rt-action="save" data-rt-entry="${id}">${icons.save}<span>Save report</span></button>
+        <span class="rt-usage">${formatTokens(entry.usage.outputTokens)} tokens${entry.usage.estimated ? " (estimated)" : ""}</span>
+      </div>`;
+
+  return `
+    <div class="rt-card rt-${token(entry.status)}">
+      <div class="rt-head">
+        <span class="rt-icon">${icons.table}</span>
+        <span class="rt-title">Round table · ${entry.mode === "review" ? "anonymous review" : "team"}</span>
+        <span class="rt-phase">${running ? sparkle("Working", 12) : ""}${escapeHtml(entry.phase)}</span>
+        ${running ? `<button class="ghost-button" type="button" data-rt-stop="${id}">Stop</button>` : ""}
+      </div>
+      <div class="rt-motion" dir="auto">${escapeHtml(entry.motion)}</div>
+      <div class="rt-lanes">${lanes}</div>
+      ${subtasks}
+      ${rankings}
+      ${final}
+      ${actions}
+    </div>`;
 }
 
 const ERROR_ACTIONS = {

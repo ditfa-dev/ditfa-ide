@@ -183,6 +183,7 @@ export class ThreadSession implements vscode.Disposable {
       modelProvider: settings.provider || null,
       approvalPolicy: settings.approvalPolicy,
       sandbox: settings.sandboxMode,
+      config,
     });
 
     const stored = await this.store.load(threadId);
@@ -247,6 +248,7 @@ export class ThreadSession implements vscode.Disposable {
       }
 
       this.setTurnStarting(true);
+      this.pendingMode = options.mode;
       const { settings, sandboxPolicy } = options;
       await this.client.request("turn/start", {
         threadId,
@@ -341,6 +343,17 @@ export class ThreadSession implements vscode.Disposable {
     this.upsert({ ...entry, changes });
     this.notes.push(note);
     void this.persist();
+  }
+
+  /**
+   * Adds or updates a row the extension made itself (a round table), keeping it in the transcript. It is saved
+   * with the conversation once it stops changing.
+   */
+  upsertHostEntry(entry: ChatEntry, settled: boolean): void {
+    this.upsert(entry);
+    if (settled) {
+      void this.persist();
+    }
   }
 
   /** Hands over, and forgets, what the agent should be told with the next message. */
