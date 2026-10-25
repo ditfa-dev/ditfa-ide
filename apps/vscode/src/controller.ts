@@ -182,6 +182,35 @@ export class DitfaController implements vscode.Disposable {
     private readonly logger: Logger,
   ) {
     this.keys = new ApiKeys(context.secrets);
+    this.ditfa = new DitfaAccount(context.secrets, this.keys, logger, this.extensionVersion());
+    this.roundTable = new RoundTableService({
+      ditfa: this.ditfa,
+      keys: this.keys,
+      logger,
+      listModels: async (provider, apiKey) => {
+        await this.connect();
+        const models = (await this.providers?.listModels(provider, apiKey)) ?? [];
+        return models.map((model) => ({ id: model.id, label: model.label }));
+      },
+      upsert: (entry) => {
+        const session = this.session;
+        if (session) {
+          session.upsertHostEntry(entry, entry.status !== "running");
+        } else {
+          this.entryEmitter.fire(entry);
+        }
+      },
+      implement: async (text) => {
+        await this.setChatMode("agent");
+        await this.send(
+          `Carry out the result of the round table below, step by step.\n\n${text}`,
+          [],
+          null,
+          false,
+          "queue",
+        );
+      },
+    });
     this.store = new TranscriptStore(join(context.globalStorageUri.fsPath, "transcripts"), logger);
     this.diffs = new DiffService(logger);
     this.hunkReview = new HunkReview(
@@ -194,10 +223,16 @@ export class DitfaController implements vscode.Disposable {
       providers: async () =>
         this.providers ? this.providers.listProviders(resolveWorkspaceRoot()) : BUILT_IN_PROVIDERS,
       chatProvider: () => this.effectiveProviderId(),
-      chatModel: () => readSettings().model || this.session?.snapshot().context?.model || this.configuredModel || "",
+      chatModel: () =>
+        readSettings().model ||
+        this.session?.snapshot().context?.model ||
+        this.configuredModel ||
+        (this.effectiveProviderId() === "ditfa" ? (this.defaultDitfaModel ?? "") : ""),
     });
     this.statusBar = new DitfaStatusBar();
     this.updateStatusBar();
+    this.subscriptions.push(this.ditfa, this.roundTable, this.ditfa.onDidChange(() => this.onDitfaChanged()));
+    void this.ditfa.load();
 
     this.subscriptions.push(
       vscode.workspace.onDidChangeConfiguration((event) => {
@@ -240,6 +275,11 @@ export class DitfaController implements vscode.Disposable {
     return this.diffs;
   }
 
+  /** How the panel says whether it is on screen, for the turn-finished notification. */
+  setPanelVisibility(visible: () => boolean): void {
+    this.panelVisible = visible;
+  }
+
   get threadSession(): ThreadSession | undefined {
     return this.session;
   }
@@ -260,6 +300,8 @@ export class DitfaController implements vscode.Disposable {
       turnActive: session?.turnActive ?? false,
       approvals: this.approvals?.pending ?? [],
       showReasoning: readSettings().showReasoning,
+      queue: this.queue.view(),
+      queuePaused: this.queue.isPaused,
     };
   }
 
@@ -335,7 +377,9 @@ export class DitfaController implements vscode.Disposable {
       await this.interrupt();
     }
     this.approvals?.cancelAll();
-    await session.resume(threadId, readSettings(), resolveWorkspaceRoot());
+    this.queue.clear();
+    this.publishQueue();
+    await session.resume(threadId, this.effectiveSettings(), resolveWorkspaceRoot(), this.threadConfig());
     await this.rememberThread(threadId);
     this.stateEmitter.fire();
   }
@@ -357,6 +401,7 @@ export class DitfaController implements vscode.Disposable {
     attachments: ContextAttachment[],
     skill: { name: string; path: string } | null = null,
     includeActiveFile = true,
+    delivery: "auto" | "queue" | "steer" = "auto",
   ): Promise<void> {
     await this.connect();
     const session = this.session;
@@ -365,6 +410,28 @@ export class DitfaController implements vscode.Disposable {
       return;
     }
 
+    const settings = readSettings();
+    const mode = settings.chatMode;
+    const active = includeActiveFile && settings.attachActiveFile ? this.activeFileContext() : null;
+    const note = modeNote(mode);
+    const input = buildUserInput(text, attachments, active, skill, [...session.takeNotes(), ...(note ? [note] : [])]);
+    const labels = attachments.map((item) => item.label);
+
+    const route = delivery === "auto" ? settings.queueBehavior : delivery;
+    if (session.turnActive && route === "queue") {
+      this.queue.enqueue(text, labels, { input, attachments: labels, mode });
+      this.publishQueue();
+      return;
+    }
+    await this.dispatch(text, labels, input, mode);
+  }
+
+  /** Starts a turn with input that is ready to go (or steers it into the running one). */
+  private async dispatch(text: string, labels: string[], input: UserInput[], mode: ChatMode): Promise<void> {
+    const session = this.session;
+    if (!session) {
+      return;
+    }
     try {
       if (!session.threadId) {
         await session.start(this.effectiveSettings(), resolveWorkspaceRoot());
