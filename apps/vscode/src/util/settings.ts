@@ -1,7 +1,7 @@
 import * as vscode from "vscode";
 
 import type { AskForApproval, ReasoningEffort, SandboxMode, SandboxPolicy } from "@ditfa-ide/protocol";
-import type { AgentMode } from "@ditfa-ide/contract";
+import type { ChatMode, PermissionLevel } from "@ditfa-ide/contract";
 
 export interface DitfaSettings {
   executablePath: string;
@@ -17,11 +17,20 @@ export interface DitfaSettings {
   /** Stop a turn past this many tokens. 0 turns the guard off. */
   maxTokensPerTurn: number;
   env: Record<string, string>;
+  chatMode: ChatMode;
+  /** What a message typed during a turn does: wait for the turn to end, or join it. */
+  queueBehavior: "queue" | "steer";
+  notifyOnComplete: "always" | "unfocused" | "never";
+  chime: boolean;
+  /** Show quick fixes as a reviewable edit (VS Code's refactor preview) before they land. */
+  quickFixPreview: boolean;
 }
 
 const VALID_EFFORTS: readonly string[] = ["minimal", "low", "medium", "high", "xhigh"];
 const VALID_APPROVALS: readonly string[] = ["untrusted", "on-request", "never"];
 const VALID_SANDBOXES: readonly string[] = ["read-only", "workspace-write", "danger-full-access"];
+const VALID_CHAT_MODES: readonly string[] = ["chat", "plan", "agent"];
+const VALID_NOTIFY: readonly string[] = ["always", "unfocused", "never"];
 
 export function readSettings(scope?: vscode.Uri): DitfaSettings {
   const config = vscode.workspace.getConfiguration("ditfa", scope ?? null);
@@ -29,6 +38,8 @@ export function readSettings(scope?: vscode.Uri): DitfaSettings {
   const effort = config.get<string>("reasoningEffort", "");
   const approval = config.get<string>("approvalPolicy", "on-request");
   const sandbox = config.get<string>("sandboxMode", "workspace-write");
+  const chatMode = config.get<string>("chatMode", "");
+  const notify = config.get<string>("notifyOnComplete", "unfocused");
 
   return {
     executablePath: config.get<string>("executablePath", "").trim(),
