@@ -191,8 +191,11 @@ root.innerHTML = `
         <button class="ring" id="ring" type="button" hidden></button>
         <button class="tool" id="roundtable-button" type="button" title="Round table: several models on one question">${icons.table}</button>
         <button class="tool model" id="model-button" type="button"></button>
+        <button class="tool" id="dictate" type="button" aria-label="Dictate">${icons.mic}</button>
+        <button class="tool" id="talk" type="button" aria-label="Voice mode">${icons.wave}</button>
         <button class="send" id="send" type="button" title="Send">${icons.send}</button>
       </div>
+      <div class="composer-hint" id="composer-hint" hidden></div>
     </div>
   </footer>
   <section class="gate" id="gate" hidden></section>
@@ -200,6 +203,9 @@ root.innerHTML = `
 `;
 
 const composer = document.getElementById("composer") as HTMLTextAreaElement;
+const voiceIo = createVoiceIo({
+  post: (message) => vscode.postMessage(message),
+});
 const scroll = document.getElementById("scroll") as HTMLElement;
 const transcript = document.getElementById("transcript") as HTMLElement;
 
@@ -248,6 +254,7 @@ function handleMessage(message: HostMessage): void {
       renderHeader();
       renderGate();
       renderToolbar();
+      renderBanner();
       renderEmpty();
       break;
     case "plan":
@@ -309,6 +316,43 @@ function handleMessage(message: HostMessage): void {
       activeEditor = message.editor;
       renderAttachments();
       break;
+    case "queue":
+      state.queue = message.queue;
+      state.queuePaused = message.paused;
+      renderQueue();
+      renderToolbar();
+      break;
+    case "voice":
+      voice = message.voice;
+      renderVoice();
+      break;
+    case "voiceCapture":
+      if (message.capture) {
+        void voiceIo.startCapture();
+      } else {
+        voiceIo.stopCapture();
+      }
+      break;
+    case "voicePlayback":
+      voiceIo.play(message.id, message.pcm16, message.sampleRate);
+      break;
+    case "voicePlaybackFile":
+      void voiceIo.playFile(message.data);
+      break;
+    case "voicePlaybackStop":
+      voiceIo.stopPlayback();
+      break;
+    case "chime":
+      voiceIo.chime();
+      break;
+    case "roundTableOptions":
+      if (popover?.kind === "roundtable") {
+        popover.options = message.options;
+        popover.selected = message.suggested;
+        popover.error = message.error;
+        renderPopover();
+      }
+      break;
   }
 }
 
@@ -322,6 +366,9 @@ function renderAll(): void {
   renderToolbar();
   renderChanges();
   renderWorking();
+  renderBanner();
+  renderQueue();
+  renderVoice();
 }
 
 function renderHeader(): void {
@@ -334,7 +381,31 @@ function renderHeader(): void {
     </button>
     <button class="tool" type="button" data-new-thread title="New conversation">${icons.plus}</button>
     <button class="tool" type="button" data-open-history title="Conversations">${icons.history}</button>
+    ${accountChip()}
   `;
+}
+
+function initials(name: string | null, email: string | null): string {
+  const source = (name || email || "?").trim();
+  const parts = source.split(/[\s@._-]+/).filter(Boolean);
+  const letters = parts.length > 1 ? `${parts[0]?.[0] ?? ""}${parts[1]?.[0] ?? ""}` : source.slice(0, 2);
+  return letters.toUpperCase();
+}
+
+/** Who is signed in and on which plan; opens the profile. Signed out, it is the way in. */
+function accountChip(): string {
+  const ditfa = state.header.ditfa;
+  if (!ditfa.signedIn) {
+    return `<button class="account-chip signed-out" type="button" data-sign-in title="Sign in to Ditfa">${icons.user}<span>Sign in</span></button>`;
+  }
+  const credits = ditfa.credits;
+  const left =
+    credits && credits.limit !== null ? `${Math.max(0, credits.limit - credits.used)} of ${credits.limit} credits left` : "";
+  const title = [ditfa.email ?? ditfa.name, ditfa.planLabel ? `${ditfa.planLabel} plan` : null, left].filter(Boolean).join(" · ");
+  return `<button class="account-chip" type="button" data-open-profile title="${escapeHtml(title)}">
+      <span class="avatar">${escapeHtml(initials(ditfa.name, ditfa.email))}</span>
+      ${ditfa.planLabel ? `<span class="plan-badge plan-${token(ditfa.plan ?? "free")}">${escapeHtml(ditfa.planLabel)}</span>` : ""}
+    </button>`;
 }
 
 function firstUserText(): string | null {
