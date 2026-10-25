@@ -416,8 +416,8 @@ function firstUserText(): string | null {
 /** Everything that stands between the user and a working chat. */
 function renderGate(): void {
   const host = document.getElementById("gate") as HTMLElement;
-  const { connection, connectionError, install, needsSetup } = state.header;
-  const key = `${connection}|${connectionError ?? ""}|${needsSetup}|${install?.stage ?? ""}`;
+  const { connection, connectionError, install, needsSetup, ditfa } = state.header;
+  const key = `${connection}|${connectionError ?? ""}|${needsSetup}|${install?.stage ?? ""}|${ditfa.signInStep}|${ditfa.signedIn}`;
 
   const show = connection !== "ready" || needsSetup;
   host.hidden = !show;
@@ -477,9 +477,21 @@ function renderGate(): void {
       </div>`;
       break;
     case "ready":
+      if (ditfa.signInStep !== "idle") {
+        host.innerHTML = `${lines}<div class="gate-body setup">${markSvg("ripple", "gate-mark")}
+          <h1>${ditfa.signInStep === "exchanging" ? "Signing you in…" : "Continue in your browser"}</h1>
+          <p>Sign in on the page that opened, with Google, a passkey or your password. Ditfa Code finishes on its own when you are done.</p>
+          ${ditfa.signInStep === "waiting" ? `<div class="wait-actions">
+            <button class="primary large" type="button" data-sign-in>Open the sign-in page again</button>
+            <button class="link" type="button" data-paste-code>The editor did not open? Paste the sign-in code</button>
+            <button class="link" type="button" data-cancel-sign-in>Cancel</button>
+          </div>` : `<p class="gate-note">${sparkle("Signing in", 16)}</p>`}
+        </div>`;
+        break;
+      }
       host.innerHTML = `${lines}<div class="gate-body setup">${markSvg("assemble", "gate-mark")}
-        <h1>Connect a model</h1>
-        <p>Pick how Ditfa reaches a model. You can change this at any time.</p>
+        <h1>Welcome to Ditfa Code</h1>
+        <p>Sign in to use your Ditfa plan: every Ditfa model, Ditfa's tools in your projects, and voice. Or bring your own key or a local model.</p>
         ${renderSetupOptions()}
       </div>`;
       break;
@@ -500,7 +512,7 @@ function renderSetupOptions(): string {
   const keys = setupOptions.filter((option) => option.kind === "apiKey");
   const local = setupOptions.filter((option) => option.kind === "local");
   return `
-    ${account ? `<button class="primary large" type="button" data-setup="${escapeHtml(account.id)}">${escapeHtml(account.label)}</button><p class="gate-note">${escapeHtml(account.detail)}</p>` : ""}
+    ${account ? `<button class="primary large" type="button" data-setup="${escapeHtml(account.id)}">${icons.sparkles}<span>${escapeHtml(account.label)}</span></button><p class="gate-note">${escapeHtml(account.detail)} <button class="link" type="button" data-setup="ditfa:key">I have a Ditfa API key</button></p>` : ""}
     <h2>Your own API key</h2><div class="setup-list">${keys.map(row).join("")}</div>
     <h2>On this machine</h2><div class="setup-list">${local.map(row).join("")}</div>
   `;
@@ -526,6 +538,7 @@ function renderContext(): RenderContext {
     showReasoning: state.showReasoning,
     codeBlocks,
     turnActive: state.turnActive,
+    editing,
   };
 }
 
@@ -685,9 +698,9 @@ function setTurnActive(active: boolean): void {
   renderToolbar();
   renderWorking();
   renderChanges();
-  // Restore buttons only exist between turns.
+  // Message actions (Edit, Back, Retry, plan actions) only exist between turns.
   for (const entry of state.entries) {
-    if (entry.kind === "user") {
+    if (entry.kind === "user" || entry.kind === "assistant" || entry.kind === "plan") {
       rerenderEntry(entry.id);
     }
   }
