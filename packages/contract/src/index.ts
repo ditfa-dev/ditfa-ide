@@ -210,7 +210,8 @@ export type ChatEntry =
   | PlanEntry
   | TurnStatsEntry
   | NoticeEntry
-  | ErrorEntry;
+  | ErrorEntry
+  | RoundTableEntry;
 
 export interface PlanStep {
   step: string;
@@ -290,11 +291,78 @@ export type ConnectionState =
   | "unavailable";
 
 /**
- * How much the agent may do without asking. This is the one choice users make;
- * it expands to an approval policy plus a sandbox the engine enforces, so "plan"
- * cannot write files however the model is prompted.
+ * What a message is for. Chat answers and explains, Plan explores and writes a plan, Agent does the work.
+ * Chat and Plan run read-only whatever the permission level: the sandbox the engine enforces blocks writes,
+ * however the model is prompted.
  */
-export type AgentMode = "plan" | "ask" | "auto" | "full";
+export type ChatMode = "chat" | "plan" | "agent";
+
+/**
+ * How much an Agent turn may do without asking. It expands to an approval policy plus a sandbox the engine
+ * enforces.
+ */
+export type PermissionLevel = "ask" | "auto" | "full";
+
+/** @deprecated The single-axis mode of 0.3; kept for reading old settings. */
+export type AgentMode = "plan" | PermissionLevel;
+
+/** The signed-in Ditfa account, as the panel shows it. */
+export interface DitfaAccountHeader {
+  signedIn: boolean;
+  /** Browser sign-in in progress: the panel shows a waiting card with Paste code and Cancel. */
+  signInStep: "idle" | "waiting" | "exchanging";
+  name: string | null;
+  email: string | null;
+  avatarUrl: string | null;
+  plan: string | null;
+  planLabel: string | null;
+  /** The plan includes Ditfa models in the editor; `false` puts the upgrade card in front of the Ditfa provider. */
+  modelsIncluded: boolean | null;
+  /** Chat credits in the plan's rolling window; `limit: null` is unlimited. */
+  credits: { used: number; limit: number | null } | null;
+  upgrade: { planLabel: string; url: string } | null;
+}
+
+/** What the composer may offer for the selected model. */
+export interface ModelCapabilitiesView {
+  vision: boolean;
+  tools: boolean;
+  reasoning: boolean;
+  efforts: string[];
+  contextWindow: number | null;
+}
+
+/** The two voice buttons: dictation types what you say; conversation talks back. */
+export interface VoiceAvailability {
+  dictation: boolean;
+  conversation: boolean;
+  /** Why a button is unavailable, shown as its tooltip (sign in, plan, no microphone…). */
+  reason: string | null;
+  /** Set when the plan is what stands in the way, so the tooltip can link to upgrading. */
+  upgradeUrl: string | null;
+}
+
+/** A message typed while a turn runs, waiting to be sent when it ends. */
+export interface QueuedMessage {
+  id: string;
+  text: string;
+  /** Display labels of what was attached. */
+  attachments: string[];
+  createdAt: number;
+}
+
+export interface VoiceView {
+  active: boolean;
+  mode: "dictation" | "conversation" | null;
+  phase: "idle" | "connecting" | "listening" | "transcribing" | "thinking" | "speaking" | "error";
+  /** 0..1 microphone level, for the meter. */
+  level: number;
+  /** What was heard so far (conversation) or the last dictation. */
+  transcript: string;
+  error: string | null;
+  /** Where the microphone is: this panel, a system recorder, or a small browser window. */
+  source: "panel" | "system" | "browser" | null;
+}
 
 export interface InstallProgress {
   stage: "download" | "verify" | "unpack";
