@@ -56,6 +56,16 @@ export function readSettings(scope?: vscode.Uri): DitfaSettings {
     attachActiveFile: config.get<boolean>("autoContext.activeFile", true),
     maxTokensPerTurn: Math.max(0, config.get<number>("maxTokensPerTurn", 0)),
     env: config.get<Record<string, string>>("env", {}) ?? {},
+    // 0.3 had no chat mode: its read-only "Plan" mode lived in the sandbox setting.
+    chatMode: VALID_CHAT_MODES.includes(chatMode)
+      ? (chatMode as ChatMode)
+      : sandbox === "read-only"
+        ? "plan"
+        : "agent",
+    queueBehavior: config.get<string>("queueBehavior", "queue") === "steer" ? "steer" : "queue",
+    notifyOnComplete: (VALID_NOTIFY.includes(notify) ? notify : "unfocused") as DitfaSettings["notifyOnComplete"],
+    chime: config.get<boolean>("chime", true),
+    quickFixPreview: config.get<boolean>("quickFix.preview", true),
   };
 }
 
@@ -74,21 +84,21 @@ export async function updateSetting<T>(key: string, value: T): Promise<void> {
   await config.update(key, value, target);
 }
 
-export function modeFromSettings(settings: Pick<DitfaSettings, "approvalPolicy" | "sandboxMode">): AgentMode {
+/** The permission level the stored policy and sandbox amount to. */
+export function permissionFromSettings(
+  settings: Pick<DitfaSettings, "approvalPolicy" | "sandboxMode">,
+): PermissionLevel {
   if (settings.sandboxMode === "danger-full-access") {
     return "full";
-  }
-  if (settings.sandboxMode === "read-only") {
-    return "plan";
   }
   return settings.approvalPolicy === "untrusted" ? "ask" : "auto";
 }
 
-export function settingsForMode(mode: AgentMode): { approvalPolicy: AskForApproval; sandboxMode: SandboxMode } {
-  switch (mode) {
-    case "plan":
-      // `never`: nothing to escalate to, so a read-only turn stays read-only.
-      return { approvalPolicy: "never", sandboxMode: "read-only" };
+export function settingsForPermission(level: PermissionLevel): {
+  approvalPolicy: AskForApproval;
+  sandboxMode: SandboxMode;
+} {
+  switch (level) {
     case "ask":
       return { approvalPolicy: "untrusted", sandboxMode: "workspace-write" };
     case "auto":
@@ -96,6 +106,26 @@ export function settingsForMode(mode: AgentMode): { approvalPolicy: AskForApprov
     case "full":
       return { approvalPolicy: "never", sandboxMode: "danger-full-access" };
   }
+}
+
+/**
+ * Chat, Plan and a window with no folder run read-only. `never`: there is nothing to escalate to, so a read-only
+ * turn stays read-only.
+ */
+export const READ_ONLY: { approvalPolicy: AskForApproval; sandboxMode: SandboxMode } = {
+  approvalPolicy: "never",
+  sandboxMode: "read-only",
+};
+
+/** The policy and sandbox a turn in `mode` gets. */
+export function settingsForTurn<T extends Pick<DitfaSettings, "approvalPolicy" | "sandboxMode" | "chatMode">>(
+  settings: T,
+): T {
+  if (settings.chatMode !== "agent") {
+    return { ...settings, ...READ_ONLY };
+  }
+  // An old read-only setting is the 0.3 Plan mode, not a permission: Agent turns may write.
+  return settings.sandboxMode === "read-only" ? { ...settings, ...settingsForPermission("auto") } : settings;
 }
 
 /** Spells the sandbox out per turn, so a mode change applies to the next message. */

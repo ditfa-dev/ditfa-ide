@@ -148,7 +148,15 @@ export class ThreadSession implements vscode.Disposable {
     };
   }
 
-  async start(settings: DitfaSettings, cwd: string | undefined): Promise<ThreadContext> {
+  /**
+   * `config` is per-thread engine config (dotted paths, like `-c` on the CLI), which is how Ditfa's tools join a
+   * thread without touching the user's config.toml.
+   */
+  async start(
+    settings: DitfaSettings,
+    cwd: string | undefined,
+    config: Record<string, JsonValue> | null = null,
+  ): Promise<ThreadContext> {
     this.reset();
     const response = await this.client.request("thread/start", {
       cwd: cwd ?? null,
@@ -156,11 +164,17 @@ export class ThreadSession implements vscode.Disposable {
       modelProvider: settings.provider || null,
       approvalPolicy: settings.approvalPolicy,
       sandbox: settings.sandboxMode,
+      config,
     });
     return this.adoptThread(response);
   }
 
-  async resume(threadId: string, settings: DitfaSettings, cwd: string | undefined): Promise<ThreadContext> {
+  async resume(
+    threadId: string,
+    settings: DitfaSettings,
+    cwd: string | undefined,
+    config: Record<string, JsonValue> | null = null,
+  ): Promise<ThreadContext> {
     this.reset();
     const response = await this.client.request("thread/resume", {
       threadId,
