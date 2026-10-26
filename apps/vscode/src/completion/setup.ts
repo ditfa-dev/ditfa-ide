@@ -37,6 +37,19 @@ export class CompletionSetup implements CompletionHost {
     });
   }
 
+  /** The chat's own provider and model, for quick fixes: they need a capable model more than a fast one. */
+  async chatTarget(): Promise<TargetResult> {
+    return resolveTarget({
+      preferences: { provider: "", model: "" },
+      chatProvider: this.deps.chatProvider(),
+      chatModel: this.deps.chatModel(),
+      providers: await this.deps.providers(),
+      storedKey: (name) => this.deps.keys.get(name),
+      env: process.env,
+      localModels: async (baseUrl) => (await fetchModels(baseUrl)) ?? [],
+    });
+  }
+
   async setup(): Promise<void> {
     const providers = (await this.deps.providers()).filter((provider) => provider.baseUrl);
     const items = await Promise.all(

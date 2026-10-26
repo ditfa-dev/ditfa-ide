@@ -292,10 +292,13 @@ export class CompletionService implements vscode.InlineCompletionItemProvider, v
   }
 
   /** Tells the user what is missing, once per kind, with the button that fixes it. */
-  private explain(kind: string, message: string): void {
+  private explain(kind: string, message: string, providerId: string | null = null): void {
     this.lastError = message;
     this.render();
-    if (this.warned.has(kind)) {
+    // Nothing set up yet, or not signed in to Ditfa: the status bar says so; a popup on the first keystroke would
+    // only interrupt someone who has not asked for anything.
+    const notSetUp = kind === "noProvider" || (kind === "noKey" && providerId === "ditfa");
+    if (notSetUp || this.warned.has(kind)) {
       return;
     }
     this.warned.add(kind);
