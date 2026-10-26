@@ -1,12 +1,15 @@
 import * as vscode from "vscode";
 
-/** Offers Ditfa in the lightbulb menu wherever the editor reports a problem. */
+/**
+ * Offers Ditfa in the lightbulb menu wherever the editor reports a problem: a quick fix that edits the lines in
+ * place (shown as a reviewable change), and the agent for problems that need more than a few lines.
+ */
 export class DitfaCodeActions implements vscode.CodeActionProvider {
   static readonly kinds = [vscode.CodeActionKind.QuickFix];
 
   provideCodeActions(
     document: vscode.TextDocument,
-    range: vscode.Range,
+    range: vscode.Range | vscode.Selection,
     context: vscode.CodeActionContext,
   ): vscode.CodeAction[] {
     const problems = context.diagnostics.filter(
@@ -18,13 +21,21 @@ export class DitfaCodeActions implements vscode.CodeActionProvider {
       return [];
     }
 
-    const action = new vscode.CodeAction("Fix with Ditfa", vscode.CodeActionKind.QuickFix);
-    action.diagnostics = problems;
-    action.command = {
-      command: "ditfa.fixProblems",
+    const quick = new vscode.CodeAction("Fix with Ditfa", vscode.CodeActionKind.QuickFix);
+    quick.diagnostics = problems;
+    quick.command = {
+      command: "ditfa.quickFix",
       title: "Fix with Ditfa",
-      arguments: [document.uri, range, problems.map((problem) => problem.message)],
+      arguments: [document.uri, problems],
     };
-    return [action];
+
+    const agent = new vscode.CodeAction("Fix with Ditfa Agent…", vscode.CodeActionKind.QuickFix);
+    agent.diagnostics = problems;
+    agent.command = {
+      command: "ditfa.fixProblems",
+      title: "Fix with Ditfa Agent",
+      arguments: [document.uri, range, problems],
+    };
+    return [quick, agent];
   }
 }
