@@ -434,20 +434,261 @@ export class DitfaController implements vscode.Disposable {
     }
     try {
       if (!session.threadId) {
-        await session.start(this.effectiveSettings(), resolveWorkspaceRoot());
+        await session.start(this.effectiveSettings(mode), resolveWorkspaceRoot(), this.threadConfig());
         await this.rememberThread(session.threadId);
       }
       this.budgetTripped = false;
-      const active = includeActiveFile && readSettings().attachActiveFile ? this.activeFileContext() : null;
-      const input = buildUserInput(text, attachments, active, skill, session.takeNotes());
-      const labels = attachments.map((item) => item.label);
-      await session.send({ text, attachments: labels }, input, this.turnOptions());
+      await session.send({ text, attachments: labels }, input, this.turnOptions(mode));
     } catch (error) {
       this.logger.error("failed to start turn", error);
+      this.queue.pause();
+      this.publishQueue();
       void vscode.window.showErrorMessage(
         `Ditfa could not start the turn: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
+  }
+
+  /** Sends `text` now (steering a running turn) and resolves with the answer once the turn ends. */
+  async askAndWait(text: string): Promise<string | null> {
+    const answer = new Promise<string | null>((resolve) => this.turnWaiters.push(resolve));
+    await this.send(text, [], null, true, "steer");
+    if (!this.session?.turnActive) {
+      // Nothing started (no engine, an error was shown): do not wait forever.
+      for (const resolve of this.turnWaiters.splice(0)) resolve(null);
+    }
+    return answer;
+  }
+
+  /** MCP servers from the engine's config, with the status the engine reports for each. */
+  async mcpServers(): Promise<{ name: string; transport: "stdio" | "http"; target: string; enabled: boolean; status: "connected" | "error" | "disabled" | "unknown"; tools?: number }[]> {
+    await this.connect();
+    const client = this.client;
+    if (!client) return [];
+    const config = await client.request("config/read", { includeLayers: false, cwd: resolveWorkspaceRoot() ?? null });
+    const raw = (config.config as Record<string, unknown>).mcp_servers;
+    const servers = raw && typeof raw === "object" ? (raw as Record<string, Record<string, unknown>>) : {};
+    let live = new Map<string, number>();
+    try {
+      const status = await client.request("mcpServerStatus/list", { limit: 100 });
+      live = new Map(status.data.map((server) => [server.name, Object.keys(server.tools).length]));
+    } catch (error) {
+      this.logger.debug(`mcpServerStatus/list failed: ${error instanceof Error ? error.message : error}`);
+    }
+    return Object.entries(servers).map(([name, server]) => {
+      const url = typeof server.url === "string" ? server.url : null;
+      const command = [server.command, ...(Array.isArray(server.args) ? server.args : [])].filter((part) => typeof part === "string").join(" ");
+      const enabled = server.enabled !== false;
+      const tools = live.get(name);
+      return {
+        name,
+        transport: url ? "http" : "stdio",
+        target: url ?? command,
+        enabled,
+        status: !enabled ? "disabled" : tools !== undefined ? "connected" : "unknown",
+        ...(tools !== undefined ? { tools } : {}),
+      };
+    });
+  }
+
+  /** Adds, replaces or (with `null`) removes an MCP server in the user's config, then has the engine reload them. */
+  async writeMcpServer(name: string, value: Record<string, string | string[] | boolean> | null): Promise<void> {
+    await this.connect();
+    const client = this.client;
+    if (!client) throw new Error("The Ditfa engine is not running.");
+    await client.request("config/value/write", { keyPath: `mcp_servers.${name}`, value, mergeStrategy: "replace" });
+    await client.request("config/mcpServer/reload", undefined);
+  }
+
+  async setMcpServerEnabled(name: string, enabled: boolean): Promise<void> {
+    await this.connect();
+    const client = this.client;
+    if (!client) throw new Error("The Ditfa engine is not running.");
+    await client.request("config/value/write", { keyPath: `mcp_servers.${name}.enabled`, value: enabled, mergeStrategy: "replace" });
+    await client.request("config/mcpServer/reload", undefined);
+  }
+
+  /** Skills the engine found for the open folders. */
+  async skills(): Promise<{ name: string; description: string; path: string }[]> {
+    await this.connect();
+    if (!this.client) return [];
+    try {
+      const response = await this.client.request("skills/list", { cwds: workspaceRoots() });
+      return response.data
+        .flatMap((entry) => entry.skills)
+        .map((skill) => ({ name: skill.name, description: skill.shortDescription ?? skill.description, path: skill.path }));
+    } catch {
+      return [];
+    }
+  }
+
+  storedKey(envKey: string): Promise<string | undefined> {
+    return this.keys.get(envKey);
+  }
+
+  /** Removes a provider key; the engine restarts so it no longer has it. */
+  async forgetKey(envKey: string): Promise<void> {
+    await this.keys.delete(envKey);
+    this.providers?.invalidate();
+    if (this.client) await this.reconnect("an API key was removed");
+  }
+
+  get engineVersion(): string | null {
+    return this.client?.version ?? null;
+  }
+
+  /** The models the Settings panel lists: what the editor's Ditfa key can call, with plan locks. */
+  async settingsModels(): Promise<ModelChoice[]> {
+    if (!this.ditfa.signedIn) return [];
+    try {
+      const models = await this.ditfaModelChoices();
+      this.rememberCapabilities(models);
+      return models;
+    } catch {
+      return [];
+    }
+  }
+
+  queueRemove(id: string): void {
+    this.queue.take(id);
+    this.publishQueue();
+  }
+
+  /** Takes a queued message back into the composer, to change it before it goes. */
+  queueEdit(id: string): void {
+    const item = this.queue.take(id);
+    this.publishQueue();
+    if (item) {
+      this.composerEmitter.fire(item.text);
+    }
+  }
+
+  /** Sends a queued message now: into the running turn, or as the next turn when none runs. */
+  async queueSendNow(id: string): Promise<void> {
+    const item = this.queue.take(id);
+    this.publishQueue();
+    if (!item) {
+      return;
+    }
+    await this.dispatch(item.text, item.payload.attachments, item.payload.input, item.payload.mode);
+  }
+
+  async queueResume(): Promise<void> {
+    this.queue.resume();
+    this.publishQueue();
+    if (!this.session?.turnActive) {
+      await this.sendNextQueued();
+    }
+  }
+
+  queueClear(): void {
+    this.queue.clear();
+    this.publishQueue();
+  }
+
+  /** Edit a sent message: rewind to before it (files and conversation) and send the new text in its place. */
+  async editMessage(turnId: string, text: string): Promise<void> {
+    if (!text.trim()) {
+      return;
+    }
+    if (await this.rewindTo(turnId, "edit")) {
+      await this.send(text, [], null, true, "steer");
+    }
+  }
+
+  /** Ask again: rewind the turn and send exactly what started it. */
+  async retryTurn(turnId: string): Promise<void> {
+    const session = this.session;
+    const original = session?.userEntryFor(turnId);
+    if (!session || !original) {
+      return;
+    }
+    const input = session.turnInput(turnId);
+    if (await this.rewindTo(turnId, "retry")) {
+      if (input) {
+        await this.dispatch(original.text, original.attachments, input, readSettings().chatMode);
+      } else {
+        await this.send(original.text, [], null, false, "steer");
+      }
+    }
+  }
+
+  async copyEntry(entryId: string): Promise<void> {
+    const entry = this.session?.snapshot().entries.find((candidate) => candidate.id === entryId);
+    const text =
+      entry?.kind === "user" || entry?.kind === "assistant" || entry?.kind === "plan"
+        ? entry.text
+        : entry?.kind === "command"
+          ? `${entry.command}\n${entry.output}`
+          : null;
+    if (text) {
+      await vscode.env.clipboard.writeText(text);
+    }
+  }
+
+  /** Puts a code block from the chat into the editor, replacing the selection. */
+  async insertCode(text: string): Promise<void> {
+    const editor = vscode.window.activeTextEditor ?? vscode.window.visibleTextEditors[0];
+    if (!editor) {
+      const document = await vscode.workspace.openTextDocument({ content: text });
+      await vscode.window.showTextDocument(document);
+      return;
+    }
+    await editor.edit((builder) => {
+      for (const selection of editor.selections) {
+        builder.replace(selection, text);
+      }
+    });
+    await vscode.window.showTextDocument(editor.document, editor.viewColumn);
+  }
+
+  /** Download, save into the project, or carry out a plan the agent wrote in Plan mode. */
+  async planAction(action: "download" | "save" | "implement", entryId: string): Promise<void> {
+    const entry = this.session?.snapshot().entries.find((candidate) => candidate.id === entryId);
+    const markdown = entry?.kind === "assistant" || entry?.kind === "plan" ? entry.text.trim() : "";
+    if (!markdown) {
+      return;
+    }
+    const name = planFileName(markdown);
+    const root = resolveWorkspaceRoot();
+
+    if (action === "implement") {
+      await this.setChatMode("agent");
+      await this.send(IMPLEMENT_PLAN_PROMPT, [], null, false, "queue");
+      return;
+    }
+    if (action === "save" && root) {
+      const target = vscode.Uri.joinPath(vscode.Uri.file(root), ".ditfa", "plans", name);
+      await vscode.workspace.fs.createDirectory(vscode.Uri.joinPath(target, ".."));
+      await vscode.workspace.fs.writeFile(target, Buffer.from(`${markdown}\n`, "utf8"));
+      await vscode.window.showTextDocument(target, { preview: true });
+      void vscode.window.showInformationMessage(`Plan saved to ${vscode.workspace.asRelativePath(target)}.`);
+      return;
+    }
+    const defaultUri = root
+      ? vscode.Uri.joinPath(vscode.Uri.file(root), name)
+      : vscode.Uri.file(join(process.env.HOME ?? process.cwd(), name));
+    const target = await vscode.window.showSaveDialog({
+      defaultUri,
+      filters: { Markdown: ["md"] },
+      title: "Download plan",
+    });
+    if (target) {
+      await vscode.workspace.fs.writeFile(target, Buffer.from(`${markdown}\n`, "utf8"));
+      void vscode.window.showInformationMessage(`Plan saved to ${target.fsPath}.`);
+    }
+  }
+
+  private async sendNextQueued(): Promise<void> {
+    const next = this.queue.next();
+    this.publishQueue();
+    if (next) {
+      await this.dispatch(next.text, next.payload.attachments, next.payload.input, next.payload.mode);
+    }
+  }
+
+  private publishQueue(): void {
+    this.queueEmitter.fire({ queue: this.queue.view(), paused: this.queue.isPaused });
   }
 
   /** Stop means stop: a turn that does not end promptly loses its engine. */
@@ -456,6 +697,7 @@ export class DitfaController implements vscode.Disposable {
     if (!session?.turnActive) {
       return;
     }
+    this.stopRequested = true;
     try {
       await session.interrupt();
     } catch (error) {
@@ -576,14 +818,22 @@ export class DitfaController implements vscode.Disposable {
    * composer so it can be edited and sent again.
    */
   async restoreCheckpoint(turnId: string): Promise<void> {
+    await this.rewindTo(turnId, "restore");
+  }
+
+  /**
+   * Reverts the files changed from `turnId` on and drops those turns. Asks first whenever files would change;
+   * Edit and Retry on a turn that changed nothing go straight through. Returns whether it rewound.
+   */
+  private async rewindTo(turnId: string, purpose: RewindPurpose): Promise<boolean> {
     const session = this.session;
     const cwd = this.threadCwd();
     if (!session || !cwd) {
-      return;
+      return false;
     }
     if (session.turnActive) {
       void vscode.window.showWarningMessage("Stop the current turn first.");
-      return;
+      return false;
     }
 
     const changes = session.changesSince(turnId);

@@ -71,6 +71,17 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         }
       }),
     );
+    controller.setPanelVisibility(() => this.view?.visible ?? false);
+  }
+
+  /** Lets the voice service receive the panel's voice messages and talk back to it. */
+  setVoiceHandler(handler: (message: WebviewMessage) => Promise<void>): void {
+    this.voiceHandler = handler;
+  }
+
+  /** Posts to the panel when it is open; voice audio and state go through here. */
+  postToView(message: HostMessage): void {
+    this.post(message);
   }
 
   resolveWebviewView(view: vscode.WebviewView): void {
@@ -173,7 +184,13 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case "send":
-        await controller.send(message.text, message.attachments, message.skill ?? null, message.includeActiveFile);
+        await controller.send(
+          message.text,
+          message.attachments,
+          message.skill ?? null,
+          message.includeActiveFile,
+          message.delivery ?? "auto",
+        );
         break;
 
       case "interrupt":
