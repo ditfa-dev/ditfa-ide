@@ -47,11 +47,23 @@ export function renderMarkdown(source: string): RenderedMarkdown {
       const code = body.join("\n");
       const blockIndex = codeBlocks.length;
       codeBlocks.push(code);
+      // A diff reads as one: added lines green, removed lines red.
+      const isDiff = language === "diff" || language === "patch";
+      const rendered = isDiff
+        ? code
+            .split("\n")
+            .map((row) => {
+              const type = row.startsWith("+") ? "add" : row.startsWith("-") ? "del" : row.startsWith("@@") ? "hunk" : "";
+              return `<span class="diff-line ${type}">${escapeHtml(row) || " "}</span>`;
+            })
+            .join("")
+        : escapeHtml(code);
       out.push(
-        `<div class="code-block">` +
+        `<div class="code-block${isDiff ? " code-diff" : ""}">` +
           `<div class="code-block-head"><span class="code-lang">${escapeHtml(language || "text")}</span>` +
+          `<button class="code-insert" type="button" data-insert-index="${blockIndex}" title="Insert at the cursor">Insert</button>` +
           `<button class="code-copy" type="button" data-copy-index="${blockIndex}">Copy</button></div>` +
-          `<pre><code>${escapeHtml(code)}</code></pre></div>`,
+          `<pre><code>${rendered}</code></pre></div>`,
       );
       continue;
     }
