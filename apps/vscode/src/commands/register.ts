@@ -65,14 +65,20 @@ export function registerCommands(
     await controller.signOut();
   });
 
+  register("ditfa.pasteSignInCode", () => controller.ditfa.pasteCode());
+
+  register("ditfa.upgrade", () => controller.openUpgrade());
+
+  // Account, plan and usage live in the Settings & Profile panel; the modal report is the fallback when the
+  // panel is not available.
   register("ditfa.showAccount", async () => {
-    await controller.connect();
-    const account = controller.accountManager;
-    if (!account) {
-      void vscode.window.showWarningMessage("The Ditfa engine is not running yet.");
+    if (controller.ditfa.signedIn) {
+      await vscode.commands.executeCommand("ditfa.openSettingsPanel");
       return;
     }
-    const report = await account.describeUsage();
+    await controller.connect();
+    const account = controller.accountManager;
+    const report = account ? await account.describeUsage() : "Not signed in to Ditfa.";
     const choice = await vscode.window.showInformationMessage(
       report,
       { modal: true },
