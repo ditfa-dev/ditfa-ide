@@ -1073,7 +1073,7 @@ export class DitfaController implements vscode.Disposable {
     if (provider.envKey) {
       const apiKey = await vscode.window.showInputBox({
         title: "Ditfa API key",
-        prompt: "Stored in your system keychain",
+        prompt: "Stored in your system keychain. Create one at chat.ditfa.com/api-keys",
         password: true,
         ignoreFocusOut: true,
         validateInput: (value) => (value.trim().length === 0 ? "Enter an API key" : undefined),
@@ -1083,6 +1083,47 @@ export class DitfaController implements vscode.Disposable {
         await this.activateProvider(provider);
       }
     }
+  }
+
+  async signIn(): Promise<void> {
+    const provider = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === "ditfa");
+    if (provider) {
+      await this.setupDitfaAccount(provider, "browser");
+    }
+  }
+
+  async useDitfaKey(): Promise<void> {
+    const provider = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === "ditfa");
+    if (provider) {
+      await this.setupDitfaAccount(provider, "key");
+    }
+  }
+
+  async signOut(): Promise<void> {
+    if (!this.ditfa.signedIn) {
+      await this.account?.signOut();
+      return;
+    }
+    const confirmed = await vscode.window.showWarningMessage(
+      "Sign out of Ditfa on this machine?",
+      {
+        modal: true,
+        detail:
+          "Ditfa Code stops using your Ditfa plan in this editor and turns off the keys it was given. Your conversations stay.",
+      },
+      "Sign out",
+    );
+    if (confirmed === "Sign out") {
+      await this.ditfa.signOut();
+      void vscode.window.showInformationMessage("Signed out of Ditfa.");
+    }
+  }
+
+  /** The billing page with the next plan selected, or the plans page. */
+  async openUpgrade(): Promise<void> {
+    const view = this.ditfa.view;
+    const url = view.profile?.upgrade?.url ?? view.links?.billing ?? "https://chat.ditfa.com/billing";
+    await vscode.env.openExternal(vscode.Uri.parse(url));
   }
 
   /** Switches to `provider` and restarts so the engine sees any new key. */
@@ -1107,13 +1148,56 @@ export class DitfaController implements vscode.Disposable {
     if (!this.providers) {
       return { ...base, models: [], error: "The Ditfa engine is not running." };
     }
+    if (provider?.id === "ditfa" && this.ditfa.signedIn) {
+      try {
+        const models = await this.ditfaModelChoices();
+        this.rememberCapabilities(models);
+        return { ...base, models, error: null };
+      } catch (error) {
+        this.logger.debug(`Ditfa model list failed, using the engine's: ${error instanceof Error ? error.message : error}`);
+      }
+    }
     try {
       const apiKey = provider?.envKey ? await this.keys.get(provider.envKey) : undefined;
       const models = await this.providers.listModels(provider, apiKey);
+      this.rememberCapabilities(models);
       return { ...base, models, error: null };
     } catch (error) {
       return { ...base, models: [], error: error instanceof Error ? error.message : String(error) };
     }
+  }
+
+  /** The models the editor's Ditfa key can call, with a lock on those the plan does not include. */
+  private async ditfaModelChoices(): Promise<ModelChoice[]> {
+    const { models } = await this.ditfa.cloud.apiModels();
+    const included = this.ditfa.view.modelsIncluded !== false;
+    const upgrade = this.ditfa.view.profile?.upgrade?.plan ?? null;
+    this.defaultDitfaModel = included ? (models.find((model) => model.available)?.id ?? null) : null;
+    return models.map((model) => ({
+      id: model.id,
+      label: model.name,
+      description: model.description,
+      efforts: [],
+      isDefault: false,
+      capabilities: {
+        vision: model.supportsVision,
+        tools: model.supportsTools,
+        reasoning: model.supportsReasoning,
+        efforts: [],
+        contextWindow: contextWindowTokens(model.contextWindow),
+      },
+      locked: !included || !model.available,
+      requiredPlan: !included || !model.available ? upgrade : null,
+    }));
+  }
+
+  private rememberCapabilities(models: ModelChoice[]): void {
+    for (const model of models) {
+      if (model.capabilities) {
+        this.modelCaps.set(model.id, model.capabilities);
+      }
+    }
+    this.pushHeader();
   }
 
   /** A model change applies to the next message; the conversation carries on. */
@@ -1144,8 +1228,13 @@ export class DitfaController implements vscode.Disposable {
     this.pushHeader();
   }
 
-  async setMode(mode: AgentMode): Promise<void> {
-    if (mode === "full") {
+  async setChatMode(mode: ChatMode): Promise<void> {
+    await updateSetting("chatMode", mode);
+    this.pushHeader();
+  }
+
+  async setPermission(level: PermissionLevel): Promise<void> {
+    if (level === "full") {
       const confirmed = await vscode.window.showWarningMessage(
         "Full access removes the sandbox. The agent can run any command and change any file this account can reach, without asking.",
         { modal: true },
@@ -1156,7 +1245,7 @@ export class DitfaController implements vscode.Disposable {
         return;
       }
     }
-    const next = settingsForMode(mode);
+    const next = settingsForPermission(level);
     await updateSetting("approvalPolicy", next.approvalPolicy);
     await updateSetting("sandboxMode", next.sandboxMode);
     this.pushHeader();
@@ -1224,6 +1313,8 @@ export class DitfaController implements vscode.Disposable {
     this.removeEmitter.dispose();
     this.composerEmitter.dispose();
     this.editorEmitter.dispose();
+    this.queueEmitter.dispose();
+    this.chimeEmitter.dispose();
     for (const subscription of this.subscriptions) {
       subscription.dispose();
     }
