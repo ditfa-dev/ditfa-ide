@@ -79,6 +79,7 @@ describe.skipIf(!binary)("the real engine", () => {
       sandboxMode: "danger-full-access",
     } as unknown as TurnOptions["settings"],
     sandboxPolicy: { type: "dangerFullAccess" },
+    mode: "agent",
   });
 
   const turnDone = () =>

@@ -850,25 +850,35 @@ export class DitfaController implements vscode.Disposable {
         .filter((step) => dirty.has(step.path))
         .map((step) => ({ path: step.path, reason: "it has unsaved edits" })),
     ];
+    const later = session.isLatestTurn(turnId) ? "" : " Later messages are removed too.";
 
-    const fileLine =
-      steps.length === 0
-        ? "No files need reverting."
-        : `${steps.length} file${steps.length === 1 ? "" : "s"} will be reverted.`;
-    const skippedLine =
-      skipped.length > 0
-        ? `\n\nLeft alone:\n${skipped.map((item) => `• ${vscode.workspace.asRelativePath(item.path)}: ${item.reason}`).join("\n")}`
-        : "";
-    const confirmed = await vscode.window.showWarningMessage(
-      "Go back to before this message?",
-      {
-        modal: true,
-        detail: `${fileLine} The conversation rewinds to this point.\n\nEffects of commands the agent ran, such as installed packages, are not undone.${skippedLine}`,
-      },
-      "Restore",
-    );
-    if (confirmed !== "Restore") {
-      return;
+    if (purpose === "restore" || steps.length > 0 || skipped.length > 0) {
+      const fileLine =
+        steps.length === 0
+          ? "No files need reverting."
+          : `${steps.length} file${steps.length === 1 ? "" : "s"} will be reverted.`;
+      const skippedLine =
+        skipped.length > 0
+          ? `\n\nLeft alone:\n${skipped.map((item) => `• ${vscode.workspace.asRelativePath(item.path)}: ${item.reason}`).join("\n")}`
+          : "";
+      const title =
+        purpose === "edit"
+          ? "Edit this message and send it again?"
+          : purpose === "retry"
+            ? "Ask this again?"
+            : "Go back to before this message?";
+      const button = purpose === "edit" ? "Edit and send" : purpose === "retry" ? "Ask again" : "Restore";
+      const confirmed = await vscode.window.showWarningMessage(
+        title,
+        {
+          modal: true,
+          detail: `${fileLine} The conversation rewinds to this point.${later}\n\nEffects of commands the agent ran, such as installed packages, are not undone.${skippedLine}`,
+        },
+        button,
+      );
+      if (confirmed !== button) {
+        return false;
+      }
     }
 
     for (const step of steps) {
@@ -883,12 +893,14 @@ export class DitfaController implements vscode.Disposable {
     const original = session.userEntryFor(turnId);
     try {
       await session.rollbackTo(turnId);
-      if (original) {
+      if (original && purpose === "restore") {
         this.composerEmitter.fire(original.text);
       }
+      return true;
     } catch (error) {
       this.logger.error("rollback failed", error);
       session.notice("Files were restored, but the conversation could not be rewound.", "warning");
+      return false;
     }
   }
 
@@ -1023,7 +1035,7 @@ export class DitfaController implements vscode.Disposable {
     }
 
     if (provider.kind === "account") {
-      await this.setupDitfaAccount(provider);
+      await this.setupDitfaAccount(provider, "browser");
       return;
     }
 
@@ -1050,25 +1062,15 @@ export class DitfaController implements vscode.Disposable {
     await this.activateProvider(provider);
   }
 
-  private async setupDitfaAccount(provider: ProviderInfo): Promise<void> {
-    const method = await vscode.window.showQuickPick(
-      [
-        {
-          id: "login" as const,
-          label: "$(globe) Sign in with your browser",
-          detail: "Confirm a one-time code on chat.ditfa.com",
-        },
-        {
-          id: "key" as const,
-          label: "$(key) Paste a Ditfa API key",
-          detail: "Create one at chat.ditfa.com/api-keys",
-        },
-      ],
-      { title: "Sign in to Ditfa" },
-    );
-    if (method?.id === "login" && this.binary) {
-      await this.account?.signIn(this.binary.path, () => void this.activateProvider(provider));
-    } else if (method?.id === "key" && provider.envKey) {
+  /** Signing in to Ditfa happens in the browser; a pasted Ditfa API key is the alternative. */
+  private async setupDitfaAccount(provider: ProviderInfo, method: "browser" | "key" = "browser"): Promise<void> {
+    if (method === "browser") {
+      if (await this.ditfa.signIn()) {
+        await this.activateProvider(provider);
+      }
+      return;
+    }
+    if (provider.envKey) {
       const apiKey = await vscode.window.showInputBox({
         title: "Ditfa API key",
         prompt: "Stored in your system keychain",
