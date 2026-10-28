@@ -714,7 +714,8 @@ function renderWorking(): void {
     host.innerHTML = "";
     return;
   }
-  host.innerHTML = `${markSvg("ripple")}<span class="working-text">Working</span><span class="working-time"></span>`;
+  const label = state.header.chatMode === "plan" ? "Planning" : state.header.chatMode === "chat" ? "Thinking" : "Working";
+  host.innerHTML = `${sparkle(label, 15)}<span class="working-text">${label}</span><span class="working-time"></span>`;
   const time = host.querySelector(".working-time") as HTMLElement;
   const tick = () => {
     const seconds = Math.floor((Date.now() - (turnStartedAt || Date.now())) / 1000);
@@ -823,22 +824,42 @@ function renderAttachments(): void {
 function renderToolbar(): void {
   const header = state.header;
   const send = document.getElementById("send") as HTMLButtonElement;
-  const stop = state.turnActive && composer.value.trim().length === 0;
-  send.innerHTML = stop ? icons.stop : icons.send;
-  send.title = stop ? "Stop" : state.turnActive ? "Add to the current turn" : "Send";
+  const typed = composer.value.trim().length > 0;
+  const stop = state.turnActive && !typed;
+  send.innerHTML = stop ? icons.stop : state.turnActive ? icons.queue : icons.send;
+  send.title = stop ? "Stop" : state.turnActive ? "Queue: send when this turn ends" : "Send";
   send.classList.toggle("stop", stop);
   send.disabled = header.connection !== "ready";
 
-  const mode = MODES.find((item) => item.id === header.mode) ?? MODES[2];
+  const hint = document.getElementById("composer-hint") as HTMLElement;
+  hint.hidden = !(state.turnActive && typed);
+  hint.innerHTML = `<kbd>Enter</kbd> queues it for after this turn · <kbd>${isMac() ? "⌘" : "Ctrl"}</kbd>+<kbd>Enter</kbd> adds it to the turn now`;
+
+  const mode = CHAT_MODES.find((item) => item.id === header.chatMode) ?? CHAT_MODES[2];
+  const permission = PERMISSIONS.find((item) => item.id === header.permission) ?? PERMISSIONS[1];
   const modeButton = document.getElementById("mode-button") as HTMLButtonElement;
-  modeButton.innerHTML = `${mode?.icon ?? ""}<span>${mode?.label ?? ""}</span>`;
-  modeButton.title = mode?.detail ?? "";
-  modeButton.classList.toggle("danger", header.mode === "full");
-  modeButton.disabled = !header.workspaceOpen;
+  const agent = header.chatMode === "agent";
+  modeButton.innerHTML = `${mode?.icon ?? ""}<span>${mode?.label ?? ""}</span>${agent && permission ? `<span class="mode-permission">${escapeHtml(permission.label)}</span>` : ""}${icons.chevron}`;
+  modeButton.title = agent && permission ? `${mode?.detail ?? ""} ${permission.detail}` : (mode?.detail ?? "");
+  modeButton.classList.toggle("danger", agent && header.permission === "full");
+
+  const caps = header.modelCapabilities;
+  const dictate = document.getElementById("dictate") as HTMLButtonElement;
+  const talk = document.getElementById("talk") as HTMLButtonElement;
+  const voiceReason = header.voice.reason ?? "";
+  dictate.classList.toggle("unavailable", !header.voice.dictation);
+  talk.classList.toggle("unavailable", !header.voice.conversation);
+  dictate.title = header.voice.dictation ? "Dictate: type with your voice" : voiceReason;
+  talk.title = header.voice.conversation ? "Voice mode: talk with Ditfa" : voiceReason;
+  dictate.hidden = voice.active;
+  talk.hidden = voice.active;
+  (document.getElementById("attach") as HTMLButtonElement).title =
+    caps && !caps.vision ? "Attach a file (@). This model does not read images." : "Attach a file (@), or paste an image";
 
   const model = document.getElementById("model-button") as HTMLButtonElement;
   const name = header.model ?? header.providerLabel ?? "Model";
-  model.innerHTML = `<span>${escapeHtml(name)}${header.reasoningEffort ? ` · ${escapeHtml(header.reasoningEffort)}` : ""}</span>${icons.chevron}`;
+  const reasoning = caps?.reasoning && header.reasoningEffort ? ` · ${escapeHtml(header.reasoningEffort)}` : "";
+  model.innerHTML = `<span>${escapeHtml(name)}${reasoning}</span>${caps ? capabilityChips(caps, true) : ""}${icons.chevron}`;
   model.title = `${header.providerLabel ?? "Default provider"}: change model`;
 
   const ring = document.getElementById("ring") as HTMLButtonElement;
@@ -852,15 +873,55 @@ function renderToolbar(): void {
   }
 }
 
+function modeMenuRows(): ModeRow[] {
+  const rows: ModeRow[] = CHAT_MODES.map((mode) => ({ kind: "mode", id: mode.id }));
+  if (state.header.chatMode === "agent" && state.header.workspaceOpen) {
+    rows.push(...PERMISSIONS.map((level): ModeRow => ({ kind: "permission", id: level.id })));
+  }
+  return rows;
+}
+
 function modeRows(index: number): string {
-  return MODES.map(
-    (mode, position) => `
-      <button class="pop-row${position === index ? " selected" : ""}${mode.id === state.header.mode ? " current" : ""}" type="button" data-mode="${token(mode.id)}">
-        <span class="pop-icon">${mode.icon}</span>
-        <span class="pop-text"><span>${mode.label}</span><small>${mode.detail}</small></span>
-        ${mode.id === state.header.mode ? icons.check : ""}
-      </button>`,
-  ).join("");
+  const rows = modeMenuRows();
+  const html = rows.map((row, position) => {
+    const item =
+      row.kind === "mode"
+        ? CHAT_MODES.find((mode) => mode.id === row.id)
+        : PERMISSIONS.find((level) => level.id === row.id);
+    const current = row.kind === "mode" ? row.id === state.header.chatMode : row.id === state.header.permission;
+    const data = row.kind === "mode" ? `data-chat-mode="${token(row.id)}"` : `data-permission="${token(row.id)}"`;
+    const heading =
+      row.kind === "permission" && rows[position - 1]?.kind === "mode"
+        ? `<div class="pop-heading">Permissions</div>`
+        : position === 0
+          ? `<div class="pop-heading">Mode</div>`
+          : "";
+    return `${heading}
+      <button class="pop-row${position === index ? " selected" : ""}${current ? " current" : ""}" type="button" ${data}>
+        <span class="pop-icon">${item?.icon ?? ""}</span>
+        <span class="pop-text"><span>${item?.label ?? ""}</span><small>${item?.detail ?? ""}</small></span>
+        ${current ? icons.check : ""}
+      </button>`;
+  });
+  const note = state.header.workspaceOpen
+    ? ""
+    : `<div class="pop-note">No folder is open, so every mode is read-only.</div>`;
+  return `${html.join("")}${note}`;
+}
+
+/** Small chips for what a model can do: images, extended thinking, context size. */
+function capabilityChips(caps: NonNullable<ModelChoice["capabilities"]>, compact = false): string {
+  const chips: string[] = [];
+  if (caps.vision) chips.push(`<span class="cap" title="Reads images">${icons.eyeSmall}</span>`);
+  if (caps.reasoning) chips.push(`<span class="cap" title="Thinks before answering">${icons.brain}</span>`);
+  if (!compact && caps.contextWindow) {
+    chips.push(`<span class="cap cap-text" title="Context window">${escapeHtml(formatTokens(caps.contextWindow))}</span>`);
+  }
+  return chips.length ? `<span class="caps">${chips.join("")}</span>` : "";
+}
+
+function isMac(): boolean {
+  return navigator.platform.toLowerCase().includes("mac");
 }
 
 function filteredModels(pop: Extract<Popover, { kind: "models" }>) {
@@ -885,6 +946,14 @@ function modelRows(pop: Extract<Popover, { kind: "models" }>): string {
               )
               .join("")}</span>`
           : "";
+      if (model.locked) {
+        return `
+        <div class="pop-row locked${position === pop.index ? " selected" : ""}">
+          <span class="pop-icon">${icons.lock}</span>
+          <span class="pop-text"><span>${escapeHtml(model.label)}</span><small>${model.requiredPlan ? `Comes with ${escapeHtml(model.requiredPlan.charAt(0).toUpperCase() + model.requiredPlan.slice(1))}` : "Not on your plan"}</small></span>
+          <button class="upgrade-pill" type="button" data-open-upgrade>Upgrade</button>
+        </div>`;
+      }
       return `
         <button class="pop-row${position === pop.index ? " selected" : ""}" type="button" data-model="${escapeHtml(model.id)}">
           <span class="pop-text"><span>${escapeHtml(model.label)}</span>${model.description ? `<small>${escapeHtml(model.description)}</small>` : ""}${efforts}</span>

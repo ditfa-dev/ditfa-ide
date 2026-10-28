@@ -306,17 +306,26 @@ function hunkRange(hunk: DiffHunk): string {
   return hunk.newStart === last ? `Line ${whole(hunk.newStart)}` : `Lines ${whole(hunk.newStart)}–${whole(last)}`;
 }
 
+function segmentsHtml(segments: Segment[]): string {
+  const html = segments
+    .map((segment) => (segment.changed ? `<mark>${escapeHtml(segment.text)}</mark>` : escapeHtml(segment.text)))
+    .join("");
+  return html || " ";
+}
+
+/** Rows with old and new line numbers, a sign column, and the changed words marked inside replaced lines. */
 function hunkLines(hunk: DiffHunk, limit: number): string {
-  const lines = hunk.lines.filter((line) => line[0] !== "\\");
-  const rows = lines
+  const rows = diffRows(hunk);
+  const shown = rows
     .slice(0, limit)
-    .map((line) => {
-      const type = line.startsWith("+") ? "add" : line.startsWith("-") ? "del" : "";
-      return `<div class="diff-line ${type}">${escapeHtml(line) || " "}</div>`;
+    .map((row) => {
+      const type = row.type === "context" ? "" : row.type;
+      const sign = row.type === "add" ? "+" : row.type === "del" ? "−" : " ";
+      return `<div class="diff-line ${type}"><span class="ln">${row.oldNo ?? ""}</span><span class="ln">${row.newNo ?? ""}</span><span class="sign">${sign}</span><span class="code">${segmentsHtml(row.segments)}</span></div>`;
     })
     .join("");
-  const more = lines.length > limit ? `<div class="diff-line hunk">… ${whole(lines.length - limit)} more lines</div>` : "";
-  return `${rows}${more}`;
+  const more = rows.length > limit ? `<div class="diff-line hunk">… ${whole(rows.length - limit)} more lines</div>` : "";
+  return `${shown}${more}`;
 }
 
 /**
@@ -330,7 +339,9 @@ function renderReviewItem(entry: FileChangeEntry, change: FileChangeSummary, ctx
   const gone = change.undone === true || (hunks.length > 0 && reverted.size >= hunks.length);
   const remaining = hunks.length - reverted.size;
   const key = `hunks:${entry.id}:${change.path}`;
-  const open = ctx.expanded.has(key) && !gone;
+  // A small edit is shown at once, so reviewing it takes no click; a large one opens on demand.
+  const small = hunks.length > 0 && hunks.length <= 3 && change.additions + change.deletions <= 40;
+  const open = (small ? !ctx.expanded.has(key) : ctx.expanded.has(key)) && !gone;
   const where = `data-review-entry="${escapeHtml(entry.id)}" data-review-path="${escapeHtml(change.path)}"`;
 
   let action = "";
