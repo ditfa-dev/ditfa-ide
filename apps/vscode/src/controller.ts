@@ -1324,7 +1324,7 @@ export class DitfaController implements vscode.Disposable {
     await this.connect();
     const session = this.session;
     if (session && !session.threadId) {
-      await session.start(this.effectiveSettings(), resolveWorkspaceRoot());
+      await session.start(this.effectiveSettings(), resolveWorkspaceRoot(), this.threadConfig());
       await this.rememberThread(session.threadId);
     }
   }
@@ -1357,7 +1357,7 @@ export class DitfaController implements vscode.Disposable {
         executable: this.binary.path,
         cwd: resolveWorkspaceRoot(),
         ditfaHome: settings.ditfaHome || undefined,
-        env: { ...(await this.keys.environment(PROVIDER_ENV_KEYS)), ...settings.env },
+        env: { ...(await this.keys.environment([...PROVIDER_ENV_KEYS, DITFA_TOOLS_ENV])), ...settings.env },
         clientVersion: this.extensionVersion(),
         logger: this.logger,
       });
@@ -1426,6 +1426,7 @@ export class DitfaController implements vscode.Disposable {
           clearTimeout(this.stopTimer);
           this.approvals?.cancelAll();
           void account.refreshRateLimits();
+          void this.afterTurn(session);
         }
       }),
       session.onContextChanged(() => {
@@ -1467,7 +1468,7 @@ export class DitfaController implements vscode.Disposable {
       return;
     }
     try {
-      await session.resume(threadId, this.effectiveSettings(), resolveWorkspaceRoot());
+      await session.resume(threadId, this.effectiveSettings(), resolveWorkspaceRoot(), this.threadConfig());
     } catch (error) {
       this.logger.info(`could not resume ${threadId}: ${error instanceof Error ? error.message : error}`);
       session.clear();
@@ -1501,6 +1502,46 @@ export class DitfaController implements vscode.Disposable {
         this.session?.notice("The Ditfa engine restarted. Your conversation is intact.", "warning");
       });
     }, delay);
+  }
+
+  /** A turn ended: say so if the user is elsewhere, then send the next queued message unless something went wrong. */
+  private async afterTurn(session: ThreadSession): Promise<void> {
+    const status = session.lastTurnStatus;
+    const answer = status === "completed" ? session.lastAnswerText() : null;
+    for (const resolve of this.turnWaiters.splice(0)) resolve(answer);
+    const stopped = this.stopRequested || status === "interrupted";
+    this.stopRequested = false;
+    if (stopped || status === "failed") {
+      this.queue.pause();
+    }
+    this.notifyTurnFinished(session, stopped ? "interrupted" : (status ?? "completed"));
+    void this.ditfa.refreshProfile();
+    if (this.session === session && !session.turnActive) {
+      await this.sendNextQueued();
+    }
+  }
+
+  private notifyTurnFinished(session: ThreadSession, status: "completed" | "failed" | "interrupted"): void {
+    if (status === "interrupted" || this.queue.size > 0) {
+      return;
+    }
+    const settings = readSettings();
+    const visible = this.panelVisible();
+    if (visible && settings.chime) {
+      this.chimeEmitter.fire();
+    }
+    const watching = visible && vscode.window.state.focused;
+    if (settings.notifyOnComplete === "never" || (settings.notifyOnComplete === "unfocused" && watching)) {
+      return;
+    }
+    const preview = session.lastAnswerPreview();
+    const title = status === "failed" ? "Ditfa stopped with an error" : "Ditfa finished";
+    const show = status === "failed" ? vscode.window.showWarningMessage : vscode.window.showInformationMessage;
+    void show(`${title}${preview ? `: ${preview}` : "."}`, "Show").then((choice) => {
+      if (choice === "Show") {
+        void vscode.commands.executeCommand("ditfa.openChat");
+      }
+    });
   }
 
   private async restartKeepingThread(message: string): Promise<void> {
@@ -1553,18 +1594,19 @@ export class DitfaController implements vscode.Disposable {
     void vscode.commands.executeCommand("setContext", "ditfa.state", this.connectionState);
   }
 
-  /** Settings with the mode a window with no folder is limited to. */
-  private effectiveSettings() {
+  /**
+   * Settings a turn in `mode` runs with: Chat and Plan are read-only, and a window with no folder is limited to
+   * read-only whatever the mode.
+   */
+  private effectiveSettings(mode: ChatMode = readSettings().chatMode) {
     const settings = readSettings();
-    if (settings.provider || !this.configuredProvider) {
-      return this.applyFolderLimit(settings);
-    }
-    return this.applyFolderLimit({ ...settings, provider: this.configuredProvider });
+    const base = settings.provider || !this.configuredProvider ? settings : { ...settings, provider: this.configuredProvider };
+    return this.applyFolderLimit(settingsForTurn({ ...base, chatMode: mode }));
   }
 
   /** Without a folder there is no workspace to sandbox writes into, so nothing is writable. */
   private applyFolderLimit<T extends ReturnType<typeof readSettings>>(settings: T): T {
-    return workspaceRoots().length > 0 ? settings : { ...settings, ...settingsForMode("plan") };
+    return workspaceRoots().length > 0 ? settings : { ...settings, ...READ_ONLY };
   }
 
   private turnOptions(): TurnOptions {

@@ -280,8 +280,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand("ditfa.selectProvider");
         break;
 
-      case "setMode":
-        await controller.setMode(message.mode);
+      case "setChatMode":
+        await controller.setChatMode(message.mode);
+        break;
+
+      case "setPermission":
+        await controller.setPermission(message.level);
         break;
 
       case "signIn":
