@@ -383,13 +383,18 @@ export interface SessionHeader {
   providerLabel: string | null;
   model: string | null;
   reasoningEffort: string | null;
-  mode: AgentMode;
+  chatMode: ChatMode;
+  permission: PermissionLevel;
   accountLabel: string | null;
   planLabel: string | null;
   /** 0-100, from the primary rate-limit window. */
   usagePercent: number | null;
   /** True until there is a way to reach a model: an account, a key, or a local server. */
   needsSetup: boolean;
+  ditfa: DitfaAccountHeader;
+  /** Capabilities of the selected model, when known. */
+  modelCapabilities: ModelCapabilitiesView | null;
+  voice: VoiceAvailability;
 }
 
 export interface SessionState {
