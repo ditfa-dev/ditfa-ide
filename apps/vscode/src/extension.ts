@@ -6,6 +6,9 @@ import { DitfaController } from "./controller";
 import { ChatViewProvider } from "@ditfa-ide/vscode/ui/chatViewProvider";
 import { DitfaCodeActions } from "@ditfa-ide/vscode/ui/codeActions";
 import { Logger } from "@ditfa-ide/vscode/util/logger";
+import { VoiceService } from "@ditfa-ide/vscode/voice/voiceService";
+import { SettingsPanel } from "@ditfa-ide/vscode/ui/settingsPanel";
+import { ControllerSettingsSource } from "@ditfa-ide/vscode/ui/settingsSource";
 
 export function activate(context: vscode.ExtensionContext): void {
   const logger = new Logger();
