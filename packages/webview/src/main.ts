@@ -1376,13 +1376,15 @@ function onClick(event: MouseEvent): void {
 
 function onDataClick(target: HTMLElement, hit: (selector: string) => HTMLElement | null): void {
   const setup = hit("[data-setup]")?.dataset.setup;
-  const mode = hit("[data-mode]")?.dataset.mode as AgentMode | undefined;
+  const chatMode = hit("[data-chat-mode]")?.dataset.chatMode as ChatMode | undefined;
+  const permission = hit("[data-permission]")?.dataset.permission as PermissionLevel | undefined;
   const effort = hit("[data-effort]");
   const model = hit("[data-model]")?.dataset.model;
   const pick = hit("[data-pick]")?.dataset.pick;
   const starter = hit("[data-starter]")?.dataset.starter;
   const toggle = hit("[data-toggle]")?.dataset.toggle;
   const copyIndex = hit("[data-copy-index]")?.dataset.copyIndex;
+  const insertIndex = hit("[data-insert-index]")?.dataset.insertIndex;
   const diffRow = hit("[data-diff-path]");
   const restore = hit("[data-restore]")?.dataset.restore;
   const review = hit("[data-review]")?.dataset.review;
@@ -1418,10 +1420,30 @@ function onDataClick(target: HTMLElement, hit: (selector: string) => HTMLElement
       path: undoFile.dataset.reviewPath ?? "",
     });
   } else if (setup) {
-    vscode.postMessage({ type: "setupProvider", id: setup });
-  } else if (mode) {
+    if (setup === "ditfa") {
+      vscode.postMessage({ type: "signIn" });
+    } else {
+      vscode.postMessage({ type: "setupProvider", id: setup });
+    }
+  } else if (chatMode) {
+    vscode.postMessage({ type: "setChatMode", mode: chatMode });
+    if (chatMode === "agent") {
+      // Stay open: the permission levels appear under Agent.
+      state.header.chatMode = chatMode;
+      popover = { kind: "modes", index: CHAT_MODES.length + PERMISSIONS.findIndex((level) => level.id === state.header.permission) };
+      renderPopover();
+    } else {
+      closePopover();
+    }
+  } else if (permission) {
     closePopover();
-    vscode.postMessage({ type: "setMode", mode });
+    vscode.postMessage({ type: "setPermission", level: permission });
+  } else if (insertIndex !== undefined) {
+    const entryId = hit("[data-entry-id]")?.dataset.entryId;
+    const code = entryId ? codeBlocks.get(entryId)?.[Number(insertIndex)] : undefined;
+    if (code !== undefined) {
+      vscode.postMessage({ type: "insertCode", text: code });
+    }
   } else if (effort) {
     chooseModel(effort.dataset.model ?? "", effort.dataset.effort ?? null);
   } else if (model) {
@@ -1437,7 +1459,7 @@ function onDataClick(target: HTMLElement, hit: (selector: string) => HTMLElement
     } else {
       expanded.add(toggle);
     }
-    rerenderEntry(toggle);
+    rerenderEntry(hit("[data-toggle]")?.dataset.toggleEntry ?? toggle);
   } else if (copyIndex !== undefined) {
     const entryId = hit("[data-entry-id]")?.dataset.entryId;
     const code = entryId ? codeBlocks.get(entryId)?.[Number(copyIndex)] : undefined;
@@ -1582,7 +1604,7 @@ function syncApprovalButtons(card: HTMLElement): void {
   }
 }
 
-function submit(): void {
+function submit(delivery: "auto" | "steer" = "auto"): void {
   const text = composer.value.trim();
   if (text.length === 0) {
     if (state.turnActive) {
@@ -1605,6 +1627,7 @@ function submit(): void {
       attachments: [...attachments],
       skill: pendingSkill,
       includeActiveFile,
+      delivery,
     });
   }
 
@@ -1709,3 +1732,280 @@ function updateJump(): void {
   (document.getElementById("jump") as HTMLElement).hidden = isNearBottom();
 }
 
+
+/** What stands between a signed-in user and Ditfa models: their plan. Offer the upgrade, and the way around it. */
+function renderBanner(): void {
+  const host = document.getElementById("banner") as HTMLElement;
+  const { ditfa, provider, connection } = state.header;
+  const show = connection === "ready" && provider === "ditfa" && ditfa.signedIn && ditfa.modelsIncluded === false;
+  host.hidden = !show;
+  if (!show) {
+    host.innerHTML = "";
+    return;
+  }
+  const next = ditfa.upgrade?.planLabel ?? "Plus";
+  host.innerHTML = `
+    <div class="banner-text">
+      <strong>Ditfa models in the editor come with ${escapeHtml(next)}</strong>
+      <span>You are on ${escapeHtml(ditfa.planLabel ?? "Free")}. Upgrade, or keep going with your own API key or a local model.</span>
+    </div>
+    <div class="banner-actions">
+      <button class="primary small" type="button" data-open-upgrade>${icons.sparkles}<span>Get ${escapeHtml(next)}</span></button>
+      <button class="ghost-button" type="button" data-change-provider>Use my own key</button>
+    </div>`;
+}
+
+function renderQueue(): void {
+  const host = document.getElementById("queue") as HTMLElement;
+  host.hidden = state.queue.length === 0;
+  if (state.queue.length === 0) {
+    host.innerHTML = "";
+    return;
+  }
+  const rows = state.queue
+    .map(
+      (item, index) => `
+      <div class="queue-row">
+        <span class="queue-index">${whole(index + 1)}</span>
+        <span class="queue-text" dir="auto" title="${escapeHtml(item.text)}">${escapeHtml(item.text.split("\n")[0] ?? "")}</span>
+        ${item.attachments.length ? `<span class="queue-attachments">+${whole(item.attachments.length)}</span>` : ""}
+        <button class="row-icon" type="button" data-queue-now="${escapeHtml(item.id)}" title="Send now, into the running turn">${icons.bolt}</button>
+        <button class="row-icon" type="button" data-queue-edit="${escapeHtml(item.id)}" title="Edit">${icons.pencil}</button>
+        <button class="row-icon" type="button" data-queue-remove="${escapeHtml(item.id)}" title="Remove">${icons.close}</button>
+      </div>`,
+    )
+    .join("");
+  host.innerHTML = `
+    <div class="queue-head">
+      ${icons.queue}<span>${state.queuePaused ? "Queue paused" : "Up next"} · ${whole(state.queue.length)}</span>
+      <span class="spacer"></span>
+      ${state.queuePaused ? `<button class="ghost-button" type="button" data-queue-resume>${icons.play}<span>Resume</span></button>` : ""}
+      <button class="ghost-button" type="button" data-queue-clear>Clear</button>
+    </div>
+    ${rows}`;
+}
+
+function renderVoice(): void {
+  const bar = document.getElementById("voice-bar") as HTMLElement;
+  const toolbar = document.getElementById("toolbar") as HTMLElement;
+  bar.hidden = !voice.active;
+  composer.hidden = voice.active && voice.mode === "conversation";
+  toolbar.classList.toggle("voice-on", voice.active);
+  if (!voice.active) {
+    bar.innerHTML = "";
+    renderToolbar();
+    return;
+  }
+  const phase =
+    voice.phase === "connecting"
+      ? "Connecting…"
+      : voice.phase === "listening"
+        ? voice.mode === "dictation" ? "Listening… speak, then stop to type it" : "Listening…"
+        : voice.phase === "transcribing"
+          ? "Writing down what you said…"
+          : voice.phase === "thinking"
+            ? "Thinking…"
+            : voice.phase === "speaking"
+              ? "Speaking · talk to interrupt"
+              : voice.phase === "error"
+                ? (voice.error ?? "Voice stopped")
+                : "";
+  const bars = Array.from({ length: 5 }, (_, index) => {
+    const height = Math.max(0.18, Math.min(1, voice.level * (1.4 - Math.abs(index - 2) * 0.25)));
+    return `<span style="transform:scaleY(${height.toFixed(2)})"></span>`;
+  }).join("");
+  const where =
+    voice.source === "browser" ? `<span class="voice-source">Microphone in your browser window</span>` : "";
+  bar.innerHTML = `
+    <span class="voice-orb${voice.phase === "speaking" ? " speaking" : ""}" aria-hidden="true">${bars}</span>
+    <span class="voice-text" dir="auto">${escapeHtml(voice.transcript || phase)}${voice.transcript ? `<small>${escapeHtml(phase)}</small>` : ""}${where}</span>
+    ${voice.phase === "speaking" ? `<button class="ghost-button" type="button" data-voice-interrupt>Interrupt</button>` : ""}
+    <button class="voice-stop" type="button" data-voice-stop title="${voice.mode === "dictation" ? "Stop and type it" : "End voice mode"}">${voice.mode === "dictation" ? icons.check : icons.close}</button>`;
+}
+
+function startVoice(mode: "dictation" | "conversation"): void {
+  const available = mode === "dictation" ? state.header.voice.dictation : state.header.voice.conversation;
+  if (!available) {
+    if (state.header.voice.upgradeUrl) {
+      vscode.postMessage({ type: "openUpgrade" });
+    } else if (!state.header.ditfa.signedIn) {
+      vscode.postMessage({ type: "signIn" });
+    }
+    return;
+  }
+  voiceIo.unlock();
+  vscode.postMessage({ type: "voiceStart", mode });
+}
+
+/** Clicks on the account chip, the banner, the sign-in card, the queue and message actions. */
+function onAccountOrQueueClick(hit: (selector: string) => HTMLElement | null): boolean {
+  if (onRoundTableClick(hit)) {
+    return true;
+  }
+  if (hit("[data-sign-in]")) {
+    vscode.postMessage({ type: "signIn" });
+  } else if (hit("[data-paste-code]")) {
+    vscode.postMessage({ type: "pasteSignInCode" });
+  } else if (hit("[data-cancel-sign-in]")) {
+    vscode.postMessage({ type: "cancelSignIn" });
+  } else if (hit("[data-open-profile]")) {
+    vscode.postMessage({ type: "openProfile" });
+  } else if (hit("[data-open-upgrade]")) {
+    closePopover();
+    vscode.postMessage({ type: "openUpgrade" });
+  } else if (hit("[data-queue-now]")) {
+    vscode.postMessage({ type: "queueSendNow", id: hit("[data-queue-now]")?.dataset.queueNow ?? "" });
+  } else if (hit("[data-queue-edit]")) {
+    vscode.postMessage({ type: "queueEdit", id: hit("[data-queue-edit]")?.dataset.queueEdit ?? "" });
+  } else if (hit("[data-queue-remove]")) {
+    vscode.postMessage({ type: "queueRemove", id: hit("[data-queue-remove]")?.dataset.queueRemove ?? "" });
+  } else if (hit("[data-queue-resume]")) {
+    vscode.postMessage({ type: "queueResume" });
+  } else if (hit("[data-queue-clear]")) {
+    vscode.postMessage({ type: "queueClear" });
+  } else if (hit("[data-copy-entry]")) {
+    const button = hit("[data-copy-entry]") as HTMLElement;
+    vscode.postMessage({ type: "copyEntry", entryId: button.dataset.copyEntry ?? "" });
+    flashCopied(button);
+  } else if (hit("[data-edit-entry]")) {
+    editing = hit("[data-edit-entry]")?.dataset.editEntry ?? null;
+    if (editing) {
+      rerenderEntry(editing);
+      const input = document.querySelector<HTMLTextAreaElement>(`[data-edit-input="${CSS.escape(editing)}"]`);
+      input?.focus();
+      input?.setSelectionRange(input.value.length, input.value.length);
+    }
+  } else if (hit("[data-edit-cancel]")) {
+    const id = editing;
+    editing = null;
+    if (id) rerenderEntry(id);
+  } else if (hit("[data-edit-send]")) {
+    sendEdit(hit("[data-edit-send]") as HTMLElement);
+  } else if (hit("[data-retry]")) {
+    vscode.postMessage({ type: "retryTurn", turnId: hit("[data-retry]")?.dataset.retry ?? "" });
+  } else if (hit("[data-plan-action]")) {
+    const button = hit("[data-plan-action]") as HTMLElement;
+    vscode.postMessage({
+      type: "planAction",
+      action: button.dataset.planAction as "download" | "save" | "implement",
+      entryId: button.dataset.planEntry ?? "",
+    });
+  } else if (hit("[data-voice-stop]")) {
+    vscode.postMessage({ type: "voiceStop" });
+  } else if (hit("[data-voice-interrupt]")) {
+    voiceIo.stopPlayback();
+    vscode.postMessage({ type: "voiceInterrupt" });
+  } else {
+    return false;
+  }
+  return true;
+}
+
+function sendEdit(button: HTMLElement): void {
+  const id = button.dataset.editEntryId ?? "";
+  const input = document.querySelector<HTMLTextAreaElement>(`[data-edit-input="${CSS.escape(id)}"]`);
+  const text = input?.value.trim() ?? "";
+  if (!text) {
+    return;
+  }
+  editing = null;
+  rerenderEntry(id);
+  vscode.postMessage({ type: "editMessage", turnId: button.dataset.editSend ?? "", text });
+}
+
+function flashCopied(button: HTMLElement): void {
+  button.classList.add("copied");
+  const previous = button.innerHTML;
+  button.innerHTML = icons.check;
+  window.setTimeout(() => {
+    button.classList.remove("copied");
+    button.innerHTML = previous;
+  }, 1200);
+}
+
+/** Seat the models (the suggested three are ticked), pick review or team, and start on what is in the composer. */
+function roundTableSheet(pop: Extract<Popover, { kind: "roundtable" }>): string {
+  const modes = `
+    <div class="rt-modes" role="radiogroup">
+      <button type="button" class="rt-mode${pop.mode === "review" ? " on" : ""}" data-rt-mode="review" role="radio" aria-checked="${pop.mode === "review"}">
+        <span>Anonymous review</span><small>Each model answers blind, critiques the others by letter, then ranks them. The leader writes the verdict.</small>
+      </button>
+      <button type="button" class="rt-mode${pop.mode === "team" ? " on" : ""}" data-rt-mode="team" role="radio" aria-checked="${pop.mode === "team"}">
+        <span>Team</span><small>The leader splits the goal, each part goes to the model best at it, and the work is reviewed and merged.</small>
+      </button>
+    </div>`;
+  if (!pop.options) {
+    return `<div class="rt-sheet">${modes}<div class="pop-note">${sparkle("Loading", 13)} Finding models…</div></div>`;
+  }
+  if (pop.options.length === 0) {
+    return `<div class="rt-sheet">${modes}<div class="pop-note">${escapeHtml(pop.error ?? "No models are available.")}</div>
+      <button class="pop-row footer-row" type="button" data-sign-in><span class="pop-text"><span>Sign in to Ditfa</span><small>Seat every Ditfa model on your plan</small></span></button></div>`;
+  }
+  const leader = pop.options.filter((option) => pop.selected.includes(option.ref)).sort((a, b) => b.score - a.score)[0];
+  const rows = pop.options
+    .slice(0, 40)
+    .map((option) => {
+      const on = pop.selected.includes(option.ref);
+      return `
+      <label class="rt-option${on ? " on" : ""}">
+        <input type="checkbox" data-rt-pick="${escapeHtml(option.ref)}" ${on ? "checked" : ""} />
+        <span class="pop-text"><span>${escapeHtml(option.label)}${leader?.ref === option.ref ? ' <span class="rt-leader">Leader</span>' : ""}</span>
+          <small>${escapeHtml(option.providerLabel)}${option.strengths.length ? ` · ${escapeHtml(option.strengths.join(", "))}` : ""}</small></span>
+        <span class="rt-score" title="Estimated overall strength">${whole(option.score)}</span>
+      </label>`;
+    })
+    .join("");
+  const count = pop.selected.length;
+  const enough = pop.mode === "review" ? count >= 2 : count >= 1;
+  return `
+    <div class="rt-sheet">
+      ${modes}
+      <div class="pop-scroll rt-options">${rows}</div>
+      ${pop.note ? `<div class="pop-note">${escapeHtml(pop.note)}</div>` : ""}
+      <div class="rt-start-row">
+        <span class="rt-hint">The question or task is what you typed in the box.</span>
+        <button class="primary small" type="button" data-rt-start ${enough ? "" : "disabled"}>${icons.table}<span>Start with ${whole(count)} model${count === 1 ? "" : "s"}</span></button>
+      </div>
+    </div>`;
+}
+
+function onRoundTableClick(hit: (selector: string) => HTMLElement | null): boolean {
+  const pop = popover?.kind === "roundtable" ? popover : null;
+  const pick = hit("[data-rt-pick]") as HTMLInputElement | null;
+  const mode = hit("[data-rt-mode]")?.dataset.rtMode as "review" | "team" | undefined;
+  const stop = hit("[data-rt-stop]")?.dataset.rtStop;
+  const action = hit("[data-rt-action]");
+  if (pop && pick) {
+    const ref = pick.dataset.rtPick ?? "";
+    pop.selected = pick.checked ? [...new Set([...pop.selected, ref])] : pop.selected.filter((item) => item !== ref);
+    renderPopover();
+  } else if (pop && mode) {
+    pop.mode = mode;
+    renderPopover();
+  } else if (pop && hit("[data-rt-start]")) {
+    const motion = composer.value.trim();
+    if (!motion) {
+      pop.note = "Write the question or task in the box first.";
+      renderPopover();
+      composer.focus();
+      return true;
+    }
+    vscode.postMessage({ type: "startRoundTable", motion, mode: pop.mode, participants: pop.selected });
+    composer.value = "";
+    autoGrow();
+    saveDraft();
+    closePopover();
+    renderToolbar();
+  } else if (stop) {
+    vscode.postMessage({ type: "stopRoundTable", entryId: stop });
+  } else if (action) {
+    vscode.postMessage({
+      type: "roundTableAction",
+      entryId: action.dataset.rtEntry ?? "",
+      action: action.dataset.rtAction as "implement" | "copy" | "save",
+    });
+  } else {
+    return false;
+  }
+  return true;
+}
