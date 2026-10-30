@@ -406,6 +406,9 @@ export interface SessionState {
   turnActive: boolean;
   approvals: ApprovalRequest[];
   showReasoning: boolean;
+  queue: QueuedMessage[];
+  /** The queue stopped after an error or a Stop, and waits for Resume. */
+  queuePaused: boolean;
 }
 
 /** Something the user attached to a message. */
@@ -443,6 +446,11 @@ export interface ModelChoice {
   description: string | null;
   efforts: string[];
   isDefault: boolean;
+  /** What the model can do, when the provider says (Ditfa's catalog and the engine's model list do). */
+  capabilities?: ModelCapabilitiesView | null;
+  /** Not on the user's plan: shown with a lock and the plan that unlocks it. */
+  locked?: boolean;
+  requiredPlan?: string | null;
 }
 
 export interface ModelCatalog {
@@ -496,7 +504,19 @@ export type HostMessage =
   | { type: "models"; catalog: ModelCatalog }
   | { type: "setupOptions"; options: SetupOption[] }
   | { type: "slashCommands"; commands: SlashCommand[] }
-  | { type: "activeEditor"; editor: ActiveEditorInfo | null };
+  | { type: "activeEditor"; editor: ActiveEditorInfo | null }
+  | { type: "queue"; queue: QueuedMessage[]; paused: boolean }
+  | { type: "voice"; voice: VoiceView }
+  /** Start or stop capturing the microphone in the panel (the host decides where audio comes from). */
+  | { type: "voiceCapture"; capture: boolean }
+  /** Spoken reply audio for the panel to play: little-endian PCM16 mono, base64. */
+  | { type: "voicePlayback"; id: number; pcm16: string; sampleRate: number }
+  /** Spoken reply audio as an encoded file (mp3, wav…), base64. */
+  | { type: "voicePlaybackFile"; id: number; data: string; mime: string }
+  | { type: "voicePlaybackStop" }
+  /** A turn finished while the panel was visible: a short sound, when enabled. */
+  | { type: "chime" }
+  | { type: "roundTableOptions"; options: RoundTableOption[]; suggested: string[]; error: string | null };
 
 /** Webview -> extension host. */
 export type WebviewMessage =
