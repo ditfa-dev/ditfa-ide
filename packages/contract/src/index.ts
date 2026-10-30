@@ -527,6 +527,11 @@ export type WebviewMessage =
       attachments: ContextAttachment[];
       skill?: { name: string; path: string } | null;
       includeActiveFile: boolean;
+      /**
+       * While a turn runs: "queue" waits for it to end, "steer" adds the message to it now. "auto" follows the
+       * user's setting. Ignored when no turn runs.
+       */
+      delivery?: "auto" | "queue" | "steer";
     }
   | { type: "interrupt" }
   | { type: "newThread" }
@@ -545,7 +550,8 @@ export type WebviewMessage =
   | { type: "selectModel"; model: string; effort: string | null }
   | { type: "selectProvider" }
   | { type: "requestModels" }
-  | { type: "setMode"; mode: AgentMode }
+  | { type: "setChatMode"; mode: ChatMode }
+  | { type: "setPermission"; level: PermissionLevel }
   | { type: "signIn" }
   | { type: "setupProvider"; id: string }
   | { type: "showAccount" }
@@ -560,4 +566,36 @@ export type WebviewMessage =
   | { type: "slashCommand"; id: string }
   | { type: "errorAction"; action: ErrorAction }
   | { type: "copy"; text: string }
-  | { type: "webviewError"; message: string };
+  | { type: "webviewError"; message: string }
+  | { type: "signOut" }
+  | { type: "pasteSignInCode" }
+  | { type: "cancelSignIn" }
+  | { type: "openProfile" }
+  | { type: "openUpgrade" }
+  | { type: "queueRemove"; id: string }
+  /** Takes a queued message back into the composer to change it. */
+  | { type: "queueEdit"; id: string }
+  /** Sends a queued message into the running turn now. */
+  | { type: "queueSendNow"; id: string }
+  | { type: "queueResume" }
+  | { type: "queueClear" }
+  /** Rewinds to before `turnId` (files and conversation) and sends `text` in its place. */
+  | { type: "editMessage"; turnId: string; text: string }
+  /** Asks again: rewinds `turnId` and sends the same message. */
+  | { type: "retryTurn"; turnId: string }
+  | { type: "copyEntry"; entryId: string }
+  | { type: "insertCode"; text: string }
+  | { type: "planAction"; action: "download" | "save" | "implement"; entryId: string }
+  | { type: "voiceStart"; mode: "dictation" | "conversation" }
+  | { type: "voiceStop" }
+  /** Barge-in: stop speaking and listen. */
+  | { type: "voiceInterrupt" }
+  /** 16 kHz little-endian PCM16 mono from the panel's microphone, base64. */
+  | { type: "voiceAudio"; pcm16: string; level: number }
+  | { type: "voiceCaptureFailed"; reason: string }
+  /** Everything queued for playback has played. */
+  | { type: "voicePlaybackEnded" }
+  | { type: "requestRoundTableOptions" }
+  | { type: "startRoundTable"; motion: string; mode: "review" | "team"; participants: string[] }
+  | { type: "stopRoundTable"; entryId: string }
+  | { type: "roundTableAction"; entryId: string; action: "implement" | "copy" | "save" };
