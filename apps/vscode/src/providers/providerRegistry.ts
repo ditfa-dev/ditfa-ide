@@ -256,13 +256,24 @@ export class ProviderRegistry {
       // Defensive: a server that keeps returning the same cursor would loop.
     } while (cursor && models.length < 500);
 
-    return models.map((model) => ({
-      id: model.model,
-      label: model.displayName || model.model,
-      description: model.description || null,
-      efforts: model.supportedReasoningEfforts.map((option) => option.reasoningEffort),
-      isDefault: model.isDefault,
-    }));
+    return models.map((model) => {
+      const efforts = model.supportedReasoningEfforts.map((option) => option.reasoningEffort);
+      return {
+        id: model.model,
+        label: model.displayName || model.model,
+        description: model.description || null,
+        efforts,
+        isDefault: model.isDefault,
+        capabilities: {
+          vision: model.inputModalities.some((modality) => modality === "image"),
+          // Every engine model can call the agent's tools; that is what the engine is for.
+          tools: true,
+          reasoning: efforts.length > 0,
+          efforts,
+          contextWindow: null,
+        },
+      };
+    });
   }
 
   private async listRemoteModels(provider: ProviderInfo, apiKey?: string): Promise<ModelChoice[]> {
