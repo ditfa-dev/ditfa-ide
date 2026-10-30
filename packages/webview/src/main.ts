@@ -956,7 +956,7 @@ function modelRows(pop: Extract<Popover, { kind: "models" }>): string {
       }
       return `
         <button class="pop-row${position === pop.index ? " selected" : ""}" type="button" data-model="${escapeHtml(model.id)}">
-          <span class="pop-text"><span>${escapeHtml(model.label)}</span>${model.description ? `<small>${escapeHtml(model.description)}</small>` : ""}${efforts}</span>
+          <span class="pop-text"><span>${escapeHtml(model.label)}${model.capabilities ? capabilityChips(model.capabilities) : ""}</span>${model.description ? `<small>${escapeHtml(model.description)}</small>` : ""}${efforts}</span>
           ${current ? icons.check : ""}
         </button>`;
     })
@@ -1001,6 +1001,9 @@ function renderPopover(): void {
       }
       break;
     }
+    case "roundtable":
+      host.innerHTML = roundTableSheet(popover);
+      break;
     case "files":
       host.innerHTML = popover.items
         .map(
@@ -1113,6 +1116,19 @@ function wireEvents(): void {
 
 function onRootKey(event: KeyboardEvent): void {
   const target = event.target as HTMLElement;
+  if (target.matches("[data-edit-input]")) {
+    if (event.key === "Escape") {
+      event.preventDefault();
+      const id = editing;
+      editing = null;
+      if (id) rerenderEntry(id);
+    } else if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.isComposing) {
+      event.preventDefault();
+      const send = target.closest(".bubble")?.querySelector<HTMLElement>("[data-edit-send]");
+      if (send) sendEdit(send);
+    }
+    return;
+  }
   if (event.key === "Escape") {
     if (historyOpen) {
       closeHistory();
@@ -1191,7 +1207,7 @@ function onComposerKey(event: KeyboardEvent): void {
   // During IME composition Enter confirms the candidate; it must not send.
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    submit();
+    submit(event.metaKey || event.ctrlKey ? "steer" : "auto");
   }
 }
 
@@ -1262,8 +1278,11 @@ function onClick(event: MouseEvent): void {
   }
   const hit = (selector: string) => target.closest<HTMLElement>(selector);
 
-  if (!hit("#popover") && !hit("#mode-button") && !hit("#model-button") && !hit("#attach")) {
+  if (!hit("#popover") && !hit("#mode-button") && !hit("#model-button") && !hit("#attach") && !hit("#roundtable-button")) {
     closePopover();
+  }
+  if (onAccountOrQueueClick(hit)) {
+    return;
   }
 
   const fileLink = hit("[data-open-file]");
@@ -1290,8 +1309,23 @@ function onClick(event: MouseEvent): void {
     insertText("@", true);
     updateSuggestions();
   } else if (hit("#mode-button")) {
-    popover = popover?.kind === "modes" ? null : { kind: "modes", index: MODES.findIndex((mode) => mode.id === state.header.mode) };
+    popover =
+      popover?.kind === "modes"
+        ? null
+        : { kind: "modes", index: CHAT_MODES.findIndex((mode) => mode.id === state.header.chatMode) };
     renderPopover();
+  } else if (hit("#roundtable-button")) {
+    if (popover?.kind === "roundtable") {
+      closePopover();
+    } else {
+      popover = { kind: "roundtable", options: null, selected: [], mode: "review", error: null, note: null };
+      renderPopover();
+      vscode.postMessage({ type: "requestRoundTableOptions" });
+    }
+  } else if (hit("#dictate")) {
+    startVoice("dictation");
+  } else if (hit("#talk")) {
+    startVoice("conversation");
   } else if (hit("#model-button")) {
     if (popover?.kind === "models") {
       closePopover();

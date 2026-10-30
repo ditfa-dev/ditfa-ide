@@ -49,3 +49,11 @@ export const icons = {
   cpu: icon('<rect x="4" y="4" width="8" height="8" rx="1.5"/><path d="M6.5 1.8V4M9.5 1.8V4M6.5 12v2.2M9.5 12v2.2M1.8 6.5H4M1.8 9.5H4M12 6.5h2.2M12 9.5h2.2"/>'),
   folder: icon('<path d="M2 4.5A1.5 1.5 0 0 1 3.5 3h3l1.5 2h4.5A1.5 1.5 0 0 1 14 6.5v5a1.5 1.5 0 0 1-1.5 1.5h-9A1.5 1.5 0 0 1 2 11.5z"/>'),
 };
+
+/**
+ * Ditfa's one loading indicator: the blue four-point sparkle that turns and breathes (packages/ui spinner in the
+ * Ditfa web app). The outer span breathes, the star turns; reduced motion leaves it still.
+ */
+export function sparkle(label = "Working", size = 14): string {
+  return `<span class="ditfa-sparkle" role="status" aria-label="${label}" style="width:${size}px;height:${size}px"><svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M12 1.5c.55 5.4 3.6 8.95 9.5 10.5-5.9 1.55-8.95 5.1-9.5 10.5-.55-5.4-3.6-8.95-9.5-10.5C8.4 10.45 11.45 6.9 12 1.5Z"/></svg></span>`;
+}
