@@ -28,6 +28,31 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.languages.registerCodeActionsProvider({ scheme: "file" }, new DitfaCodeActions(), {
       providedCodeActionKinds: DitfaCodeActions.kinds,
     }),
+    // `<scheme>://ditfa.ditfa-code/auth-callback?code=…&state=…` from the Ditfa sign-in page.
+    vscode.window.registerUriHandler({
+      handleUri: (uri) => {
+        if (!controller.ditfa.handleUri(uri)) {
+          logger.debug(`ignored URI ${uri.path}`);
+        }
+      },
+    }),
+  );
+
+  const voice = new VoiceService({
+    cloud: controller.ditfa.cloud,
+    logger,
+    post: (message) => view.postToView(message),
+    insert: (text) => view.insertIntoComposer(text),
+    ask: (text) => controller.askAndWait(text),
+    speakerTarget: () => controller.completion.chatTarget(),
+  });
+  view.setVoiceHandler((message) => voice.handle(message));
+  context.subscriptions.push(voice);
+
+  const settings = new ControllerSettingsSource(controller, context, logger);
+  context.subscriptions.push(
+    settings,
+    vscode.commands.registerCommand("ditfa.openSettingsPanel", () => SettingsPanel.show(context, settings, logger)),
   );
 
   registerCommands(context, controller, view, logger);
