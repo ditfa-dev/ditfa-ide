@@ -3,6 +3,29 @@
 All notable changes to the Ditfa Code extension are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.0] — 2026-11-03
+
+Ditfa Code now lives in its own repository, [ditfa-dev/ditfa-ide](https://github.com/ditfa-dev/ditfa-ide), split into packages under `@ditfa-ide/*`.
+
+### Added
+
+- **Round table.** Put several models on one task. *Review* mode: every model answers on its own, critiques the others anonymously (labels, not names), ranks them, and the leader writes the result with the disagreements kept. *Team* mode: the leader splits the work and each part goes to the model best suited for it, reviewed by a different model. The leader is the strongest participant by default. Each model gets its own live lane; a token and cost budget stops the table cleanly. Save the outcome to `.ditfa/round-tables/`, copy it, or hand it to the agent to implement.
+- **Voice.** A dictation button that only types what you say, and a separate voice mode that talks back in your language, with hands-free turn taking and barge-in. Voice requests go to the agent (with a spoken summary) or to a quick assistant; voice, language, and microphone source are settings.
+- **Settings panel** (**Ditfa: Open Settings Panel**): account and plan, usage meters, models per feature, modes and permissions, Tab autocomplete, voice, round table, MCP servers and skills, all searchable.
+- **Message queue.** Messages sent while Ditfa works wait above the input and go out one by one; reorder, edit, remove, or send one now. <kbd>Cmd/Ctrl</kbd>+<kbd>Enter</kbd> steers the running turn instead. A failed or stopped turn pauses the queue.
+- **Fix with Ditfa** now fixes the code in place: a quick, focused edit around the problem, shown in the refactor preview first. **Fix with Ditfa Agent…** hands the problem to the agent instead.
+- Per-message actions: copy, edit and resend, retry, and **Back to here**, which restores the files and the conversation to that message.
+- Plans can be downloaded, saved into the project, or implemented with one click.
+- Notification and an optional chime when a task finishes or needs your approval.
+- Models show what they accept (images, files, reasoning effort) and only the controls they support; models your plan does not include are marked, with the plan that does.
+
+### Changed
+
+- Modes are two separate choices: **Chat / Plan / Agent** (what Ditfa does) and **Read only / Ask first / Auto / Full access** (what it may touch).
+- Tab autocomplete is on by default and stays silent until a provider is set.
+- Diffs show line numbers and word-level highlights; small changes open expanded.
+- The loading mark is the Ditfa sparkle.
+
 ## [0.4.0] — 2026-10-24
 
 ### Added

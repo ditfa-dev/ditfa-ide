@@ -1,6 +1,6 @@
 {
   "name": "@ditfa-ide/core",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "private": true,
   "description": "Editor-independent logic of Ditfa Code: patches, checkpoints, transcripts, completion prompts.",
   "license": "Apache-2.0",
