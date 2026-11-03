@@ -289,11 +289,102 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case "signIn":
-        this.post({ type: "setupOptions", options: await controller.setupOptions() });
+        await controller.signIn();
+        break;
+
+      case "signOut":
+        await controller.signOut();
+        break;
+
+      case "pasteSignInCode":
+        await controller.ditfa.pasteCode();
+        break;
+
+      case "cancelSignIn":
+        controller.ditfa.cancelSignIn();
+        break;
+
+      case "openProfile":
+        await vscode.commands.executeCommand("ditfa.openSettingsPanel");
+        break;
+
+      case "openUpgrade":
+        await controller.openUpgrade();
+        break;
+
+      case "queueRemove":
+        controller.queueRemove(message.id);
+        break;
+
+      case "queueEdit":
+        controller.queueEdit(message.id);
+        break;
+
+      case "queueSendNow":
+        await controller.queueSendNow(message.id);
+        break;
+
+      case "queueResume":
+        await controller.queueResume();
+        break;
+
+      case "queueClear":
+        controller.queueClear();
+        break;
+
+      case "editMessage":
+        await controller.editMessage(message.turnId, message.text);
+        break;
+
+      case "retryTurn":
+        await controller.retryTurn(message.turnId);
+        break;
+
+      case "copyEntry":
+        await controller.copyEntry(message.entryId);
+        break;
+
+      case "insertCode":
+        await controller.insertCode(message.text);
+        break;
+
+      case "planAction":
+        await controller.planAction(message.action, message.entryId);
+        break;
+
+      case "requestRoundTableOptions": {
+        const { options, suggested, error } = await controller.roundTable.options();
+        this.post({ type: "roundTableOptions", options, suggested, error });
+        break;
+      }
+
+      case "startRoundTable":
+        await controller.roundTable.start(message.motion, message.mode, message.participants);
+        break;
+
+      case "stopRoundTable":
+        controller.roundTable.stop(message.entryId);
+        break;
+
+      case "roundTableAction":
+        await controller.roundTable.action(message.entryId, message.action);
+        break;
+
+      case "voiceStart":
+      case "voiceStop":
+      case "voiceInterrupt":
+      case "voiceAudio":
+      case "voiceCaptureFailed":
+      case "voicePlaybackEnded":
+        await this.voiceHandler?.(message);
         break;
 
       case "setupProvider":
-        await controller.setupProvider(message.id);
+        if (message.id === "ditfa:key") {
+          await controller.useDitfaKey();
+        } else {
+          await controller.setupProvider(message.id);
+        }
         break;
 
       case "showAccount":
