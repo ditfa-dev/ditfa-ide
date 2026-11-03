@@ -51,7 +51,8 @@
   },
   "main": "./dist/extension.js",
   "activationEvents": [
-    "onStartupFinished"
+    "onStartupFinished",
+    "onUri"
   ],
   "capabilities": {
     "untrustedWorkspaces": {
@@ -197,13 +198,40 @@
       },
       {
         "command": "ditfa.openSettings",
-        "title": "Open Settings",
+        "title": "Open Editor Settings",
         "category": "Ditfa",
         "icon": "$(gear)"
+      },
+      {
+        "command": "ditfa.openSettingsPanel",
+        "title": "Open Settings Panel",
+        "category": "Ditfa",
+        "icon": "$(gear)"
+      },
+      {
+        "command": "ditfa.quickFix",
+        "title": "Fix with Ditfa",
+        "category": "Ditfa"
+      },
+      {
+        "command": "ditfa.pasteSignInCode",
+        "title": "Paste Sign-in Code",
+        "category": "Ditfa"
+      },
+      {
+        "command": "ditfa.upgrade",
+        "title": "Upgrade Plan",
+        "category": "Ditfa",
+        "icon": "$(rocket)"
       }
     ],
     "menus": {
       "view/title": [
+        {
+          "command": "ditfa.openSettingsPanel",
+          "when": "view == ditfa.chatView",
+          "group": "navigation"
+        },
         {
           "command": "ditfa.openTerminal",
           "when": "view == ditfa.chatView",
@@ -391,8 +419,8 @@
         },
         "ditfa.completion.enabled": {
           "type": "boolean",
-          "default": false,
-          "markdownDescription": "Suggest code as you type; press `Tab` to accept. Off until you turn it on, because the code around your cursor is sent to the provider you choose. Use **Ditfa: Set Up Tab Autocomplete** to pick one.",
+          "default": true,
+          "markdownDescription": "Suggest code as you type; press `Tab` to accept. Suggestions use the provider set in **Ditfa: Set Up Tab Autocomplete** (your Ditfa plan, an API key, or a local model); nothing is sent until one is set.",
           "scope": "window"
         },
         "ditfa.completion.provider": {
@@ -473,6 +501,165 @@
           },
           "markdownDescription": "Extra environment variables for the `ditfa` process. API keys belong in the panel's provider setup, which stores them in your system keychain; these are plain text.",
           "scope": "machine-overridable"
+        },
+        "ditfa.chatMode": {
+          "type": "string",
+          "enum": [
+            "",
+            "chat",
+            "plan",
+            "agent"
+          ],
+          "enumDescriptions": [
+            "Remember the last mode chosen in the chat",
+            "Answer and explain; never edits files",
+            "Write a step-by-step plan first, then implement it when you say so",
+            "Edit files and run commands to finish the task"
+          ],
+          "default": "",
+          "markdownDescription": "How Ditfa works on each message. Leave empty to keep the mode last picked in the chat.",
+          "scope": "window"
+        },
+        "ditfa.queueBehavior": {
+          "type": "string",
+          "enum": [
+            "queue",
+            "steer"
+          ],
+          "enumDescriptions": [
+            "Messages sent while Ditfa is working wait in a queue and go out one by one",
+            "Messages sent while Ditfa is working are added to the current turn"
+          ],
+          "default": "queue",
+          "markdownDescription": "What `Enter` does while a turn is running. The other choice is always on `Cmd/Ctrl+Enter`.",
+          "scope": "window"
+        },
+        "ditfa.notifyOnComplete": {
+          "type": "string",
+          "enum": [
+            "always",
+            "unfocused",
+            "never"
+          ],
+          "enumDescriptions": [
+            "Notify after every finished turn",
+            "Notify only when the editor or the chat is not in focus",
+            "Never notify"
+          ],
+          "default": "unfocused",
+          "description": "Show a notification when Ditfa finishes a task.",
+          "scope": "window"
+        },
+        "ditfa.chime": {
+          "type": "boolean",
+          "default": true,
+          "description": "Play a short sound when Ditfa finishes or needs your approval.",
+          "scope": "window"
+        },
+        "ditfa.quickFix.preview": {
+          "type": "boolean",
+          "default": true,
+          "markdownDescription": "Show **Fix with Ditfa** changes in the refactor preview before applying them.",
+          "scope": "window"
+        },
+        "ditfa.voice.language": {
+          "type": "string",
+          "default": "",
+          "markdownDescription": "Language for dictation and voice replies, as a BCP-47 tag such as `en`, `de` or `fa`. Empty follows the editor's display language.",
+          "scope": "window"
+        },
+        "ditfa.voice.voice": {
+          "type": "string",
+          "default": "nova",
+          "description": "The voice Ditfa speaks with in voice mode.",
+          "scope": "window"
+        },
+        "ditfa.voice.captureSource": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "panel",
+            "system",
+            "browser"
+          ],
+          "enumDescriptions": [
+            "Pick the first microphone source that works",
+            "Record in the chat panel",
+            "Record with sox or ffmpeg on this machine",
+            "Record in a small local browser page"
+          ],
+          "default": "auto",
+          "description": "Where the microphone is recorded.",
+          "scope": "machine"
+        },
+        "ditfa.voice.handsFree": {
+          "type": "boolean",
+          "default": true,
+          "description": "In voice mode, keep listening after each reply and stop when you go quiet.",
+          "scope": "window"
+        },
+        "ditfa.voice.autoSendDictation": {
+          "type": "boolean",
+          "default": false,
+          "description": "Send dictated text right away instead of leaving it in the message box.",
+          "scope": "window"
+        },
+        "ditfa.voice.target": {
+          "type": "string",
+          "enum": [
+            "agent",
+            "assistant"
+          ],
+          "enumDescriptions": [
+            "Voice requests go to the coding agent, which answers with a spoken summary",
+            "Voice requests go to a quick spoken assistant that does not edit files"
+          ],
+          "default": "agent",
+          "description": "Who answers in voice mode.",
+          "scope": "window"
+        },
+        "ditfa.roundtable.defaultMode": {
+          "type": "string",
+          "enum": [
+            "review",
+            "team"
+          ],
+          "enumDescriptions": [
+            "Models answer independently, critique each other anonymously, rank, and the leader writes the result",
+            "The leader splits the task and each part goes to the model best suited for it"
+          ],
+          "default": "review",
+          "description": "How a new round table works.",
+          "scope": "window"
+        },
+        "ditfa.roundtable.participants": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "markdownDescription": "Models that sit at the round table by default, as `provider/model` ids. Empty picks a diverse set from the models you can use.",
+          "scope": "window"
+        },
+        "ditfa.roundtable.maxRounds": {
+          "type": "number",
+          "default": 2,
+          "minimum": 1,
+          "maximum": 4,
+          "description": "Most critique rounds in review mode; the table stops earlier when nobody changes their answer.",
+          "scope": "window"
+        },
+        "ditfa.roundtable.leader": {
+          "type": "string",
+          "default": "auto",
+          "markdownDescription": "Model that leads the round table. `auto` picks the strongest participant.",
+          "scope": "window"
+        },
+        "ditfa.featureModels": {
+          "type": "object",
+          "default": {},
+          "markdownDescription": "Model used for each feature, such as `{\"completion\": \"ditfa/fast\", \"voice\": \"ditfa/voice\"}`. Easier to set in **Ditfa: Open Settings Panel**.",
+          "scope": "window"
         }
       }
     }
