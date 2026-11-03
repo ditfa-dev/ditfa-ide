@@ -54,7 +54,20 @@ const styleConfig = {
   outfile: resolve(here, "dist/webview.css"),
 };
 
-const configs = [extensionConfig, webviewConfig, styleConfig];
+/** The Settings & Profile panel: its own bundle, so the chat never loads it. */
+const settingsConfig = {
+  ...webviewConfig,
+  entryPoints: [resolve(root, "packages/webview/src/settings/main.ts")],
+  outfile: resolve(here, "dist/settings.js"),
+};
+
+const settingsStyleConfig = {
+  ...styleConfig,
+  entryPoints: [resolve(root, "packages/webview/src/settings/settings.css")],
+  outfile: resolve(here, "dist/settings.css"),
+};
+
+const configs = [extensionConfig, webviewConfig, styleConfig, settingsConfig, settingsStyleConfig];
 
 if (watch) {
   const contexts = await Promise.all(configs.map((config) => context(config)));

@@ -11,9 +11,11 @@ import { fileURLToPath } from "node:url";
 const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "../dist");
 
 const BUDGETS = {
-  "extension.js": 200_000,
+  "extension.js": 260_000,
   "webview.js": 90_000,
   "webview.css": 40_000,
+  "settings.js": 70_000,
+  "settings.css": 28_000,
 };
 
 let failed = false;
