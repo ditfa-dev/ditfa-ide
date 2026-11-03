@@ -15,9 +15,7 @@ const repoRoot = resolve(here, "..");
 const SCHEMA = "ditfa-rs/app-server-protocol/schema/typescript";
 // The engine lives in its own repository (ditfa-dev/ditfa-cli). Point DITFA_ENGINE_DIR at a checkout of it, or keep
 // it next to this one.
-const candidates = [process.env.DITFA_ENGINE_DIR, resolve(repoRoot, "../ditfa-cli"), resolve(repoRoot, "..")].filter(
-  Boolean,
-);
+const candidates = [process.env.DITFA_ENGINE_DIR, resolve(repoRoot, "../ditfa-cli")].filter(Boolean);
 const engineDir = candidates.find((dir) => existsSync(resolve(dir, SCHEMA)));
 const source = engineDir ? resolve(engineDir, SCHEMA) : resolve(candidates[0], SCHEMA);
 const target = resolve(repoRoot, "packages/protocol/src/generated");
