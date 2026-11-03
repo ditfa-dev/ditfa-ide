@@ -1,0 +1,9 @@
+Ditfa Code
+Copyright 2026 Ditfa
+
+The wire types in packages/protocol/src/generated are generated from the Ditfa CLI
+(https://github.com/ditfa-dev/ditfa-cli), a derivative work of OpenAI Codex,
+licensed under the Apache License 2.0.
+
+OpenAI Codex
+Copyright 2025 OpenAI
