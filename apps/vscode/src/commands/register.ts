@@ -144,19 +144,28 @@ export function registerCommands(
     }
   });
 
-  register("ditfa.fixProblems", async (resource, range, messages) => {
+  register("ditfa.quickFix", async (resource, diagnostics) => {
+    // From the Command Palette there are no arguments: fix the problems in the active editor.
+    const uri = resource instanceof vscode.Uri ? resource : vscode.window.activeTextEditor?.document.uri;
+    if (!uri) {
+      void vscode.window.showInformationMessage("Open a file with problems to fix them with Ditfa.");
+      return;
+    }
+    const document = await vscode.workspace.openTextDocument(uri);
+    const problems = (diagnostics as vscode.Diagnostic[] | undefined) ?? vscode.languages.getDiagnostics(uri);
+    await runQuickFix(document, problems, {
+      target: () => controller.completion.chatTarget(),
+      logger,
+      askAgent: (target, found) => askAgentToFix(controller, view, target, found),
+      setUp: () => controller.signIn(),
+    });
+  });
+
+  // The agent path: the problems with everything the editor knows about them, and the code around them.
+  register("ditfa.fixProblems", async (resource, _range, diagnostics) => {
     const uri = resource as vscode.Uri;
-    const problems = (messages as string[]).map((message) => `- ${message}`).join("\n");
-    const lines = range as vscode.Range;
-    const relative = vscode.workspace.asRelativePath(uri, false);
-    view.reveal();
-    await controller.send(`Fix these problems:\n${problems}`, [
-      {
-        kind: "file",
-        path: `${relative}:${lines.start.line + 1}`,
-        label: uri.path.split("/").pop() ?? relative,
-      },
-    ]);
+    const problems = (diagnostics as vscode.Diagnostic[] | undefined) ?? vscode.languages.getDiagnostics(uri);
+    await askAgentToFix(controller, view, uri, problems);
   });
 
   register("ditfa.fixTerminalOutput", async () => {
@@ -233,4 +242,40 @@ function captureSelection(): ContextAttachment | undefined {
     text: editor.document.getText(editor.selection),
     language: editor.document.languageId,
   };
+}
+
+/** Hands the problems to the agent in the chat, with the code they are in attached as a selection. */
+async function askAgentToFix(
+  controller: DitfaController,
+  view: ChatViewProvider,
+  uri: vscode.Uri,
+  diagnostics: readonly vscode.Diagnostic[],
+): Promise<void> {
+  const document = await vscode.workspace.openTextDocument(uri);
+  const problems = diagnostics.map(problemInfo);
+  if (problems.length === 0) {
+    return;
+  }
+  const first = Math.max(1, Math.min(...problems.map((problem) => problem.startLine)) - 15);
+  const last = Math.min(document.lineCount, Math.max(...problems.map((problem) => problem.endLine)) + 15);
+  const relative = vscode.workspace.asRelativePath(uri, false);
+  const list = problems
+    .map((problem) => {
+      const where = problem.startLine === problem.endLine ? `line ${problem.startLine}` : `lines ${problem.startLine}-${problem.endLine}`;
+      const origin = [problem.source, problem.code].filter(Boolean).join(" ");
+      return `- ${relative} ${where} (${problem.severity}${origin ? `, ${origin}` : ""}): ${problem.message}`;
+    })
+    .join("\n");
+  view.reveal();
+  await controller.setChatMode("agent");
+  await controller.send(`Fix these problems:\n${list}`, [
+    {
+      kind: "selection",
+      path: relative,
+      label: `${uri.path.split("/").pop() ?? relative}:${first}-${last}`,
+      range: { start: first, end: last },
+      text: document.getText(new vscode.Range(first - 1, 0, last - 1, document.lineAt(last - 1).text.length)),
+      language: document.languageId,
+    },
+  ]);
 }
