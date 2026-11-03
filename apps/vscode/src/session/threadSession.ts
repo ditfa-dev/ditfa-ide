@@ -365,6 +365,45 @@ export class ThreadSession implements vscode.Disposable {
     return this.turnOrder[this.turnOrder.length - 1] ?? null;
   }
 
+  get lastTurnStatus(): "completed" | "failed" | "interrupted" | null {
+    return this.lastStatus;
+  }
+
+  /** The latest answer in full, when the latest turn produced one. */
+  lastAnswerText(): string | null {
+    const entries = this.orderedEntries();
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index];
+      if (entry?.kind === "assistant" && entry.text.trim()) return entry.text;
+      if (entry?.kind === "user") return null;
+    }
+    return null;
+  }
+
+  /** The first line of the latest answer, for the "finished" notification. */
+  lastAnswerPreview(max = 90): string | null {
+    const entries = this.orderedEntries();
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const entry = entries[index];
+      if (entry?.kind === "assistant" && entry.text.trim()) {
+        const line = entry.text.trim().split("\n")[0]?.replace(/^#+\s*/, "").replace(/[*_`]/g, "") ?? "";
+        return line.length > max ? `${line.slice(0, max - 1)}…` : line;
+      }
+      if (entry?.kind === "user") return null;
+    }
+    return null;
+  }
+
+  /** The input `turnId` was started with, when this session started it. */
+  turnInput(turnId: string): UserInput[] | null {
+    return this.turnInputs.get(turnId) ?? null;
+  }
+
+  /** Whether `turnId` is the latest turn: Retry and Edit on older turns rewind everything after them too. */
+  isLatestTurn(turnId: string): boolean {
+    return this.latestTurnId === turnId;
+  }
+
   userEntryFor(turnId: string): UserEntry | null {
     const entry = this.orderedEntries().find(
       (candidate) => candidate.kind === "user" && candidate.turnId === turnId,
@@ -423,6 +462,8 @@ export class ThreadSession implements vscode.Disposable {
         this.activeTurnId = notification.params.turn.id;
         this.turnStarting = false;
         this.turnOrder.push(notification.params.turn.id);
+        if (this.lastUserMessage) this.turnInputs.set(notification.params.turn.id, this.lastUserMessage.input);
+        this.turnModes.set(notification.params.turn.id, this.pendingMode);
         this.turnStartTokens = this.tokenUsage?.total ?? 0;
         this.turnModel = this.context?.model ?? null;
         this.lastErrorMessage = null;
@@ -435,6 +476,8 @@ export class ThreadSession implements vscode.Disposable {
 
       case "turn/completed": {
         const turn = notification.params.turn;
+        this.lastStatus =
+          turn.status === "interrupted" ? "interrupted" : turn.status === "failed" || turn.error ? "failed" : "completed";
         this.activeTurnId = null;
         this.turnStarting = false;
         this.clearRetry();
@@ -666,8 +709,16 @@ export class ThreadSession implements vscode.Disposable {
   }
 
   private upsert(entry: ChatEntry): void {
-    this.insert(entry);
-    this.entryEmitter.fire(entry);
+    const stamped = this.stampMode(entry);
+    this.insert(stamped);
+    this.entryEmitter.fire(stamped);
+  }
+
+  /** Marks an answer with its turn's mode, so a Plan-mode answer can be saved or carried out. */
+  private stampMode(entry: ChatEntry): ChatEntry {
+    if (entry.kind !== "assistant" || entry.mode || !entry.turnId) return entry;
+    const mode = this.turnModes.get(entry.turnId);
+    return mode && mode !== "agent" ? { ...entry, mode } : entry;
   }
 
   private remove(id: string): void {

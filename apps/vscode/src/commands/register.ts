@@ -82,12 +82,12 @@ export function registerCommands(
     const choice = await vscode.window.showInformationMessage(
       report,
       { modal: true },
-      account.current.account ? "Sign out" : "Sign in",
+      account?.current.account ? "Sign out" : "Sign in",
     );
     if (choice === "Sign in") {
-      await controller.setupProvider("ditfa");
+      await controller.signIn();
     } else if (choice === "Sign out") {
-      await account.signOut();
+      await controller.signOut();
     }
   });
 
