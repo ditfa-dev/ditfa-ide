@@ -7,14 +7,26 @@ name: Release
 # Marketplace: set the repository variable VSCE_TRUSTED_PUBLISHING=true once the
 # publisher trusts this workflow, or provide the VSCE_PAT secret.
 # Open VSX: provide the OVSX_PAT secret.
-# A registry with no credentials is skipped; the GitHub Release always happens.
+# A registry with no credentials is skipped with a warning; the GitHub Release always happens.
+#
+# Run it again for an existing tag (after adding a credential, say) from Actions > Release > Run workflow.
+# Releases are edited in place and a version a registry already has is skipped, so a re-run is safe.
 
 on:
   push:
     tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to release, such as v0.5.0
+        required: true
+        type: string
 
 permissions:
   contents: read
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
 
 jobs:
   check:
@@ -23,6 +35,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
       - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
@@ -50,6 +63,7 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
+          ref: refs/tags/${{ env.TAG }}
           persist-credentials: false
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
@@ -60,13 +74,14 @@ jobs:
           path: dist
       - name: Check the tag matches the manifest
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "not a release tag: $TAG"; exit 1 ;; esac
+          version="${TAG#v}"
           manifest=$(node -p "require('./apps/vscode/package.json').version")
           [ "$version" = "$manifest" ] || { echo "tag $version, manifest $manifest"; exit 1; }
           test -f "dist/ditfa-code-$version.vsix"
       - name: Write the release notes
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           (cd dist && sha256sum "ditfa-code-$version.vsix" > "ditfa-code-$version.vsix.sha256")
           {
             printf '## Install\n\n'
@@ -83,30 +98,36 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          version="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" "dist/ditfa-code-$version.vsix" "dist/ditfa-code-$version.vsix.sha256" \
-            --repo "$GITHUB_REPOSITORY" \
-            --title "Ditfa Code $version" \
-            --notes-file dist/notes.md \
-            --verify-tag
+          version="${TAG#v}"
+          files=("dist/ditfa-code-$version.vsix" "dist/ditfa-code-$version.vsix.sha256")
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release upload "$TAG" "${files[@]}" --repo "$GITHUB_REPOSITORY" --clobber
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file dist/notes.md
+          else
+            gh release create "$TAG" "${files[@]}" \
+              --repo "$GITHUB_REPOSITORY" \
+              --title "Ditfa Code $version" \
+              --notes-file dist/notes.md \
+              --verify-tag
+          fi
       - name: VS Code Marketplace
         env:
           VSCE_PAT: ${{ secrets.VSCE_PAT }}
           TRUSTED: ${{ vars.VSCE_TRUSTED_PUBLISHING }}
         run: |
           if [ "$TRUSTED" = "true" ]; then
-            npx --yes @vscode/vsce@3.6.0 publish --packagePath "dist/ditfa-code-${GITHUB_REF_NAME#v}.vsix" --oidc
+            npx --yes @vscode/vsce@3.6.0 publish --skip-duplicate --packagePath "dist/ditfa-code-${TAG#v}.vsix" --oidc
           elif [ -n "$VSCE_PAT" ]; then
-            npx --yes @vscode/vsce@3.6.0 publish --packagePath "dist/ditfa-code-${GITHUB_REF_NAME#v}.vsix"
+            npx --yes @vscode/vsce@3.6.0 publish --skip-duplicate --packagePath "dist/ditfa-code-${TAG#v}.vsix"
           else
-            echo "No Marketplace credentials; skipped."
+            echo "::warning::No Marketplace credentials (VSCE_PAT or VSCE_TRUSTED_PUBLISHING); skipped."
           fi
       - name: Open VSX
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
           if [ -n "$OVSX_PAT" ]; then
-            npx --yes ovsx publish "dist/ditfa-code-${GITHUB_REF_NAME#v}.vsix" -p "$OVSX_PAT"
+            npx --yes ovsx publish "dist/ditfa-code-${TAG#v}.vsix" --skip-duplicate -p "$OVSX_PAT"
           else
-            echo "No Open VSX token; skipped."
+            echo "::warning::No Open VSX token (OVSX_PAT); skipped."
           fi
