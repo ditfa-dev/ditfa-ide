@@ -1609,11 +1609,93 @@ export class DitfaController implements vscode.Disposable {
     return workspaceRoots().length > 0 ? settings : { ...settings, ...READ_ONLY };
   }
 
-  private turnOptions(): TurnOptions {
-    const settings = this.effectiveSettings();
+  private turnOptions(mode: ChatMode = readSettings().chatMode): TurnOptions {
+    const settings = this.effectiveSettings(mode);
     return {
       settings,
       sandboxPolicy: sandboxPolicyFor(settings.sandboxMode, workspaceRoots(), settings.allowNetwork),
+      mode,
+    };
+  }
+
+  /** Per-thread engine config: Ditfa's own tools join every thread of a signed-in editor. */
+  private threadConfig(): Record<string, string> | null {
+    return this.ditfa.toolsConfig();
+  }
+
+  /** Sign-in or sign-out changes the keys the engine runs with, so it restarts with the new environment. */
+  private onDitfaChanged(): void {
+    const signedIn = this.ditfa.signedIn;
+    if (signedIn !== this.ditfaSignedIn) {
+      this.ditfaSignedIn = signedIn;
+      this.voiceConfig = null;
+      if (signedIn) {
+        void this.loadVoiceConfig();
+        void this.ditfaModelChoices()
+          .then((models) => this.rememberCapabilities(models))
+          .catch(() => undefined);
+      } else {
+        this.defaultDitfaModel = null;
+      }
+      // During our own sign-in, activating the provider reconnects; another window's sign-in or any sign-out
+      // needs it here.
+      if (this.client && (!signedIn || this.ditfa.view.signInStep === "idle")) {
+        void this.reconnect(signedIn ? "signed in to Ditfa" : "signed out of Ditfa");
+      }
+    }
+    void this.refreshProviderReady();
+    this.pushHeader();
+    this.updateStatusBar();
+  }
+
+  private async loadVoiceConfig(): Promise<void> {
+    try {
+      this.voiceConfig = await this.ditfa.cloud.voiceConfig();
+      this.pushHeader();
+    } catch (error) {
+      this.logger.debug(`voice config failed: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+
+  private ditfaHeader(): DitfaAccountHeader {
+    const view = this.ditfa.view;
+    const profile = view.profile;
+    return {
+      signedIn: view.signedIn,
+      signInStep: view.signInStep,
+      name: view.user?.name ?? null,
+      email: view.user?.email ?? null,
+      avatarUrl: view.user?.image ?? null,
+      plan: view.plan,
+      planLabel: view.planLabel,
+      modelsIncluded: view.modelsIncluded,
+      credits: profile ? { used: profile.credits.used, limit: profile.credits.limit } : null,
+      upgrade: profile?.upgrade ? { planLabel: planLabel(profile.upgrade.plan), url: profile.upgrade.url } : null,
+    };
+  }
+
+  private voiceAvailability(): VoiceAvailability {
+    if (!this.ditfa.signedIn) {
+      return { dictation: false, conversation: false, reason: "Sign in to Ditfa to talk to Ditfa Code.", upgradeUrl: null };
+    }
+    const config = this.voiceConfig;
+    if (!config) {
+      return { dictation: false, conversation: false, reason: "Checking voice…", upgradeUrl: null };
+    }
+    if (!config.planAllowsVoice) {
+      const view = this.ditfa.view;
+      return {
+        dictation: false,
+        conversation: false,
+        reason: "Voice comes with Ditfa Plus and above.",
+        upgradeUrl: view.profile?.upgrade?.url ?? view.links?.billing ?? null,
+      };
+    }
+    return {
+      dictation: config.transcription,
+      conversation: config.transcription && config.speech,
+      reason: config.transcription ? null : "Voice is not available right now.",
+      upgradeUrl: null,
     };
   }
 
@@ -1639,7 +1721,7 @@ export class DitfaController implements vscode.Disposable {
   private async refreshProviderReady(): Promise<void> {
     const id = this.effectiveProviderId();
     const provider = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === id);
-    const signedIn = Boolean(this.account?.current.account);
+    const signedIn = Boolean(this.account?.current.account) || (provider?.id === "ditfa" && this.ditfa.signedIn);
     let ready = signedIn;
     if (!provider) {
       // A custom provider from config.toml: the user has already set it up.
@@ -1690,8 +1772,10 @@ export class DitfaController implements vscode.Disposable {
     const settings = readSettings();
     const context = this.session?.snapshot().context ?? null;
     const accountView = this.account?.view();
+    const ditfa = this.ditfa.view;
     const provider = this.effectiveProviderId();
     const open = workspaceRoots().length > 0;
+    const model = settings.model || context?.model || this.configuredModel;
 
     return {
       connection: this.connectionState,
@@ -1704,13 +1788,17 @@ export class DitfaController implements vscode.Disposable {
       provider,
       providerLabel: BUILT_IN_PROVIDERS.find((item) => item.id === provider)?.name ?? provider,
       // The setting wins: it is what the next turn will actually use.
-      model: settings.model || context?.model || this.configuredModel,
+      model,
       reasoningEffort: settings.reasoningEffort ?? context?.reasoningEffort ?? null,
-      mode: open ? modeFromSettings(settings) : "plan",
-      accountLabel: accountView?.label ?? null,
-      planLabel: accountView?.planLabel ?? null,
+      chatMode: settings.chatMode,
+      permission: permissionFromSettings(settings),
+      accountLabel: ditfa.signedIn ? (ditfa.user?.email ?? ditfa.user?.name ?? null) : (accountView?.label ?? null),
+      planLabel: ditfa.signedIn ? ditfa.planLabel : (accountView?.planLabel ?? null),
       usagePercent: accountView?.usagePercent ?? null,
       needsSetup: this.connectionState === "ready" && !this.providerReady,
+      ditfa: this.ditfaHeader(),
+      modelCapabilities: model ? (this.modelCaps.get(model) ?? null) : null,
+      voice: this.voiceAvailability(),
     };
   }
 
