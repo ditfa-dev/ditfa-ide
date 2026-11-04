@@ -95,6 +95,7 @@ jobs:
           } > dist/notes.md
           grep -q '^### ' dist/notes.md || { echo "CHANGELOG has no entry for $version"; exit 1; }
       - name: GitHub Release
+        id: github_release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -116,13 +117,14 @@ jobs:
           TRUSTED: ${{ vars.VSCE_TRUSTED_PUBLISHING }}
         run: |
           if [ "$TRUSTED" = "true" ]; then
-            npx --yes @vscode/vsce@4.0.0 publish --skip-duplicate --packagePath "dist/ditfa-code-${TAG#v}.vsix" --oidc
+            npx --yes @vscode/vsce@4.1.0 publish --skip-duplicate --packagePath "dist/ditfa-code-${TAG#v}.vsix" --oidc
           elif [ -n "$VSCE_PAT" ]; then
             npx --yes @vscode/vsce@3.6.0 publish --skip-duplicate --packagePath "dist/ditfa-code-${TAG#v}.vsix"
           else
             echo "::warning::No Marketplace credentials (VSCE_PAT or VSCE_TRUSTED_PUBLISHING); skipped."
           fi
       - name: Open VSX
+        if: ${{ !cancelled() && steps.github_release.outcome == 'success' }}
         env:
           OVSX_PAT: ${{ secrets.OVSX_PAT }}
         run: |
