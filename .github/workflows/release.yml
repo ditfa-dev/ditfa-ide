@@ -116,7 +116,7 @@ jobs:
           TRUSTED: ${{ vars.VSCE_TRUSTED_PUBLISHING }}
         run: |
           if [ "$TRUSTED" = "true" ]; then
-            npx --yes @vscode/vsce@3.6.0 publish --skip-duplicate --packagePath "dist/ditfa-code-${TAG#v}.vsix" --oidc
+            npx --yes @vscode/vsce@4.0.0 publish --skip-duplicate --packagePath "dist/ditfa-code-${TAG#v}.vsix" --oidc
           elif [ -n "$VSCE_PAT" ]; then
             npx --yes @vscode/vsce@3.6.0 publish --skip-duplicate --packagePath "dist/ditfa-code-${TAG#v}.vsix"
           else
