@@ -94,6 +94,28 @@ export const BUILT_IN_PROVIDERS: ProviderInfo[] = [
   },
 ];
 
+/**
+ * Where a provider may be called with a key from the keychain. Config (a project's included) can redefine a
+ * provider's URL or add providers, so a stored key only ever goes to the built-in provider's own URL, and a
+ * provider from config is reachable only on this machine and never gets a stored key.
+ */
+export function trustedEndpoint(provider: ProviderInfo): { provider: ProviderInfo; keyEnv: string | null } | null {
+  const builtIn = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === provider.id);
+  if (builtIn) {
+    return { provider: builtIn, keyEnv: builtIn.envKey ?? (builtIn.id === "openai" ? OPENAI_KEY_ENV : null) };
+  }
+  return provider.baseUrl && isLoopback(provider.baseUrl) ? { provider, keyEnv: null } : null;
+}
+
+function isLoopback(url: string): boolean {
+  try {
+    const host = new URL(url).hostname;
+    return host === "localhost" || host === "127.0.0.1" || host === "[::1]" || host === "::1";
+  } catch {
+    return false;
+  }
+}
+
 /** Where OpenAI's key is kept for direct calls (round table, Tab): the engine itself keeps it in its own login. */
 export const OPENAI_KEY_ENV = "OPENAI_API_KEY";
 

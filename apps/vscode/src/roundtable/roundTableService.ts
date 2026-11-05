@@ -18,7 +18,7 @@ import type { RoundTableEntry, RoundTableLane, RoundTableOption } from "@ditfa-i
 import type { ApiKeys } from "@ditfa-ide/vscode/account/apiKeys";
 import type { DitfaAccount } from "@ditfa-ide/vscode/account/ditfaAccount";
 import { DITFA_ENGINE_ENV } from "@ditfa-ide/vscode/account/ditfaAccount";
-import { OPENAI_KEY_ENV, probeLocal, type ProviderInfo } from "@ditfa-ide/vscode/providers/providerRegistry";
+import { probeLocal, trustedEndpoint, type ProviderInfo } from "@ditfa-ide/vscode/providers/providerRegistry";
 import type { Logger } from "@ditfa-ide/vscode/util/logger";
 
 export interface RoundTableDeps {
@@ -103,7 +103,10 @@ export class RoundTableService implements vscode.Disposable {
       }
     }
 
-    const providers = await this.deps.providers();
+    const providers = (await this.deps.providers())
+      .map((provider) => trustedEndpoint(provider))
+      .filter((trusted): trusted is NonNullable<typeof trusted> => trusted !== null)
+      .map((trusted) => trusted.provider);
     await Promise.all(
       providers.filter((provider) => provider.id !== "ditfa" && provider.baseUrl).map(async (provider) => {
         try {
@@ -297,7 +300,9 @@ export class RoundTableService implements vscode.Disposable {
     if (provider === "ditfa") {
       return { kind: "openai-compatible", baseUrl: DITFA_MODELS_URL, apiKey: (await this.deps.keys.get(DITFA_ENGINE_ENV)) ?? null, model: id };
     }
-    const info = (await this.deps.providers()).find((candidate) => candidate.id === provider);
+    const configured = (await this.deps.providers()).find((candidate) => candidate.id === provider);
+    const trusted = configured ? trustedEndpoint(configured) : null;
+    const info = trusted?.provider;
     if (!info?.baseUrl) throw new Error(`Unknown provider ${provider}.`);
     const apiKey = (await this.keyFor(info)) ?? null;
     return {
@@ -308,9 +313,9 @@ export class RoundTableService implements vscode.Disposable {
     };
   }
 
-  /** A provider's key: the keychain, then the environment (custom providers name their own variable). */
+  /** A built-in provider's key from the keychain or the environment; providers from config get none. */
   private async keyFor(provider: ProviderInfo): Promise<string | undefined> {
-    const env = provider.envKey ?? (provider.id === "openai" ? OPENAI_KEY_ENV : null);
+    const env = trustedEndpoint(provider)?.keyEnv;
     if (!env) return undefined;
     return (await this.deps.keys.get(env)) ?? process.env[env] ?? undefined;
   }

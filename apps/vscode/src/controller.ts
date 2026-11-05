@@ -27,6 +27,7 @@ import {
   PROVIDER_ENV_KEYS,
   probeLocal,
   OPENAI_KEY_ENV,
+  trustedEndpoint,
   ProviderRegistry,
   type ProviderInfo,
 } from "@ditfa-ide/vscode/providers/providerRegistry";
@@ -1260,8 +1261,13 @@ export class DitfaController implements vscode.Disposable {
       }
     }
     try {
-      const apiKey = provider?.envKey ? await this.keys.get(provider.envKey) : undefined;
-      const models = await this.providers.listModels(provider, apiKey);
+      // A stored key only goes to the built-in provider's own URL, whatever a (project) config says.
+      const trusted = provider ? trustedEndpoint(provider) : null;
+      if (provider && !trusted) {
+        return { ...base, models: [], error: `${provider.name} is defined in your Ditfa config; pick its models by id.` };
+      }
+      const apiKey = trusted?.keyEnv ? await this.keys.get(trusted.keyEnv) : undefined;
+      const models = await this.providers.listModels(trusted?.provider ?? provider, apiKey);
       this.rememberCapabilities(models);
       return { ...base, models, error: null };
     } catch (error) {
