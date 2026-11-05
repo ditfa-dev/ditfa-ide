@@ -271,7 +271,7 @@ describe("terminal_run", () => {
     expect(editor.created).toHaveLength(0);
   });
 
-  it("types the command blind when shell integration never starts, and says the output is unknown", async () => {
+  it("never types blind into a terminal the user named when shell integration is missing", async () => {
     vi.useFakeTimers();
     try {
       const { tools, signal } = setup();
@@ -279,6 +279,23 @@ describe("terminal_run", () => {
       const terminal = editor.makeTerminal("bash", false) as FakeTerminal;
       editor.terminals.push(terminal);
       const pending = tools.handle(call("terminal_run", { command: "make", terminal: "bash" }), signal);
+      const failure = expect(pending).rejects.toMatchObject({ code: "unsupported" });
+      await vi.advanceTimersByTimeAsync(3_000);
+      await failure;
+      expect(terminal.sendText).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("types the command blind in Ditfa's own terminal when shell integration never starts, and says the output is unknown", async () => {
+    vi.useFakeTimers();
+    try {
+      const { tools, signal } = setup();
+      access = "allow";
+      const terminal = editor.makeTerminal("Ditfa", false) as FakeTerminal;
+      editor.terminals.push(terminal);
+      const pending = tools.handle(call("terminal_run", { command: "make", terminal: "Ditfa" }), signal);
       await vi.advanceTimersByTimeAsync(3_000);
       const result = await pending;
       expect(terminal.sendText).toHaveBeenCalledWith("make", true);

@@ -127,6 +127,14 @@ export class TerminalTools {
 
     const integration = await waitForShellIntegration(terminal, SHELL_INTEGRATION_WAIT_MS, signal);
     if (!integration) {
+      // Typing blind is only acceptable in Ditfa's own terminal. In a terminal the user named it could be a REPL,
+      // an ssh session or a password prompt, and the command would land in the wrong place.
+      if (terminal.name !== DITFA_TERMINAL_NAME) {
+        throw new DeviceToolError(
+          "unsupported",
+          `"${terminal.name}" has no shell integration, so Ditfa cannot run a command there safely. Omit "terminal" to use Ditfa's own terminal, or enable shell integration for this shell.`,
+        );
+      }
       terminal.sendText(command, true);
       return {
         terminal: capture.info(terminal),
