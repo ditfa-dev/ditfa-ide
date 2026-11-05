@@ -1,9 +1,8 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { availableParallelism, tmpdir } from "node:os";
 import { join } from "node:path";
-import { randomBytes } from "node:crypto";
 
 import type { SpeechBackend } from "@ditfa-ide/cloud";
 import type { LocalDictationView } from "@ditfa-ide/contract";
@@ -153,16 +152,17 @@ export class LocalDictation {
   }
 
   private async transcribe(bin: string, model: string, wav: Uint8Array, language: string | undefined, prompt: string, signal?: AbortSignal): Promise<string> {
-    const dir = join(tmpdir(), "ditfa-dictation");
-    await mkdir(dir, { recursive: true });
-    const file = join(dir, `${randomBytes(8).toString("hex")}.wav`);
-    await writeFile(file, wav);
+    // A private directory per phrase (mkdtemp: 0700), the recording readable by this user only, never an existing
+    // file: a shared temp folder must not let anyone else read or swap the user's voice.
+    const dir = await mkdtemp(join(tmpdir(), "ditfa-dictation-"));
+    const file = join(dir, "speech.wav");
+    await writeFile(file, wav, { mode: 0o600, flag: "wx" });
     try {
       const threads = Math.max(2, Math.min(8, availableParallelism() - 1));
       const stdout = await run(bin, whisperArgs({ model, wav: file, language, threads, prompt }), TRANSCRIBE_TIMEOUT_MS, signal);
       return parseWhisperOutput(stdout);
     } finally {
-      await rm(file, { force: true });
+      await rm(dir, { recursive: true, force: true });
     }
   }
 
