@@ -1,8 +1,14 @@
 import type { ConnectionState } from "@ditfa-ide/contract";
-import { actionKey, type McpServer, type SettingsLinks } from "@ditfa-ide/contract/settings";
+import {
+  actionKey,
+  type McpServer,
+  type SettingsLinks,
+  type TerminalAccess,
+  type TerminalBridgeState,
+} from "@ditfa-ide/contract/settings";
 import { icons } from "@ditfa-ide/webview/icons";
 import { escapeHtml } from "@ditfa-ide/webview/markdown";
-import { button, chip, data, dot, row, type Field, type Tone } from "./controls";
+import { button, chip, data, dot, row, select, type Choice, type Field, type Tone } from "./controls";
 import { settingsIcons } from "./icons";
 import type { Group, Row, ViewContext } from "./view";
 
@@ -14,6 +20,11 @@ export function toolGroups(ctx: ViewContext): Group[] {
   const { servers } = ctx.snapshot.mcp;
   return [
     { title: "Ditfa tools", rows: [ditfaToolsRow(ctx)] },
+    {
+      title: "Terminal access",
+      note: "Commands run in a terminal you can see. Output Ditfa reads has obvious secrets hidden first.",
+      rows: [terminalAccessRow(ctx)],
+    },
     {
       title: "MCP servers",
       note: "Servers give the agent more tools. They run with your permissions, so add only ones you trust.",
@@ -57,6 +68,44 @@ function ditfaToolsRow(ctx: ViewContext): Row {
       ...(endpoint ? { extra: `<div class="row-desc"><code>${esc(endpoint)}</code></div>` } : {}),
     }),
     search: "ditfa tools web search image video connected apps connections",
+  };
+}
+
+const TERMINAL_ACCESS: readonly (Choice & { value: TerminalAccess })[] = [
+  { value: "off", label: "Off" },
+  { value: "ask", label: "Ask before running commands" },
+  { value: "allow", label: "Read and run without asking" },
+];
+
+const BRIDGE: Readonly<Record<TerminalBridgeState, { label: string; tone: Tone }>> = {
+  off: { label: "Off", tone: "muted" },
+  signedOut: { label: "Sign in to connect", tone: "muted" },
+  connecting: { label: "Connecting", tone: "muted" },
+  connected: { label: "Connected", tone: "ok" },
+  standby: { label: "Another window is connected", tone: "muted" },
+  refused: { label: "Refused", tone: "danger" },
+};
+
+function terminalAccessRow(ctx: ViewContext): Row {
+  const id = "mcp-terminal-access";
+  const key = "mcp.terminalAccess";
+  const { terminalAccess, terminalBridge, terminalBridgeError } = ctx.snapshot.mcp;
+  const error = ctx.errors.get(id) ?? (terminalBridge === "refused" ? terminalBridgeError : undefined);
+  const field: Field = {
+    id,
+    label: "Terminal access",
+    description:
+      "Lets Ditfa — in the web app, the desktop app and here — read your editor's terminals and, if you allow, run commands in them. Uses your Ditfa sign-in.",
+    busy: ctx.busy.has(key),
+    ...(error ? { error } : {}),
+  };
+  const status = BRIDGE[terminalBridge];
+  return {
+    id,
+    html: row(field, select(field, { kind: "choice", key }, TERMINAL_ACCESS, terminalAccess), {
+      badge: chip(status.label, { tone: status.tone }),
+    }),
+    search: `terminal access shell commands run read device bridge web desktop ${TERMINAL_ACCESS.map((choice) => choice.label).join(" ")} ${status.label}`,
   };
 }
 

@@ -2,7 +2,7 @@
   "name": "ditfa-code",
   "displayName": "Ditfa Code",
   "description": "The AI coding agent that shows its work. Tab autocomplete, any model, your own keys or a Ditfa plan, review and undo every change hunk by hunk, checkpoints without Git, and a sandbox the engine enforces.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "publisher": "ditfa",
   "license": "Apache-2.0",
   "icon": "media/icon.png",
@@ -417,6 +417,27 @@
           "markdownDescription": "Stop a turn once it has used this many tokens. `0` turns the limit off.",
           "scope": "resource"
         },
+        "ditfa.terminalAccess": {
+          "type": "string",
+          "enum": [
+            "off",
+            "ask",
+            "allow"
+          ],
+          "enumItemLabels": [
+            "Off",
+            "Ask before running commands",
+            "Read and run without asking"
+          ],
+          "enumDescriptions": [
+            "Ditfa cannot see or use this editor's terminals",
+            "Ditfa can read your terminals; each command it wants to run waits for your approval",
+            "Ditfa can read your terminals and run commands in them without asking"
+          ],
+          "default": "off",
+          "markdownDescription": "**Terminal access.** Lets Ditfa — in the web app, the desktop app and here — read your editor's terminals and, if you allow, run commands in them. Uses your Ditfa sign-in. Commands never run in Restricted Mode.",
+          "scope": "machine"
+        },
         "ditfa.completion.enabled": {
           "type": "boolean",
           "default": true,
@@ -696,5 +717,11 @@
   "homepage": "https://ditfa.com/downloads",
   "extensionKind": [
     "workspace"
-  ]
+  ],
+  "dependencies": {
+    "ws": "^8.22.1"
+  },
+  "devDependencies": {
+    "@types/ws": "^8.18.2"
+  }
 }

@@ -9,6 +9,8 @@ import { Logger } from "@ditfa-ide/vscode/util/logger";
 import { VoiceService } from "@ditfa-ide/vscode/voice/voiceService";
 import { SettingsPanel } from "@ditfa-ide/vscode/ui/settingsPanel";
 import { ControllerSettingsSource } from "@ditfa-ide/vscode/ui/settingsSource";
+import { DeviceBridgeService } from "@ditfa-ide/vscode/devices/deviceBridge";
+import { DITFA_TOOLS_ENV } from "@ditfa-ide/vscode/account/ditfaAccount";
 
 export function activate(context: vscode.ExtensionContext): void {
   const logger = new Logger();
@@ -50,7 +52,16 @@ export function activate(context: vscode.ExtensionContext): void {
   view.setVoiceHandler((message) => voice.handle(message));
   context.subscriptions.push(voice);
 
-  const settings = new ControllerSettingsSource(controller, context, logger);
+  // Terminal access for Ditfa on the web, the desktop app and MCP clients. Off until the user turns it on.
+  const devices = new DeviceBridgeService({
+    context,
+    account: controller.ditfa,
+    toolsKey: () => controller.storedKey(DITFA_TOOLS_ENV),
+    logger,
+  });
+  context.subscriptions.push(devices);
+
+  const settings = new ControllerSettingsSource(controller, context, logger, devices);
   context.subscriptions.push(
     settings,
     vscode.commands.registerCommand("ditfa.openSettingsPanel", () => SettingsPanel.show(context, settings, logger)),

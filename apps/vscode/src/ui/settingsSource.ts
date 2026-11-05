@@ -12,6 +12,7 @@ import type {
   SettingsSnapshot,
 } from "@ditfa-ide/contract/settings";
 import type { DitfaController } from "@ditfa-ide/vscode/controller";
+import { readTerminalAccess, type DeviceBridgeService } from "@ditfa-ide/vscode/devices/deviceBridge";
 import { BUILT_IN_PROVIDERS, OPENAI_KEY_ENV, probeLocal, type ProviderInfo } from "@ditfa-ide/vscode/providers/providerRegistry";
 import type { Logger } from "@ditfa-ide/vscode/util/logger";
 import { permissionFromSettings, readSettings, resolveWorkspaceRoot, updateSetting } from "@ditfa-ide/vscode/util/settings";
@@ -50,9 +51,11 @@ export class ControllerSettingsSource implements SettingsDataSource, vscode.Disp
     private readonly controller: DitfaController,
     private readonly context: vscode.ExtensionContext,
     private readonly logger: Logger,
+    private readonly bridge?: DeviceBridgeService,
   ) {
     this.subscriptions = [
       controller.ditfa.onDidChange(() => this.emitter.fire()),
+      ...(bridge ? [bridge.onDidChange(() => this.emitter.fire())] : []),
       vscode.workspace.onDidChangeConfiguration((event) => {
         if (event.affectsConfiguration("ditfa")) this.emitter.fire();
       }),
@@ -163,6 +166,7 @@ export class ControllerSettingsSource implements SettingsDataSource, vscode.Disp
       mcp: {
         servers: mcp,
         ditfaTools: { connected: Boolean(this.controller.ditfa.toolsConfig()) },
+        ...this.terminalStatus(),
       },
       skills,
       rules: { projectRulesPath: rulesUri?.fsPath ?? null, exists: rulesExist },
@@ -187,6 +191,11 @@ export class ControllerSettingsSource implements SettingsDataSource, vscode.Disp
         return;
       case "roundtable":
         await updateSetting(`roundtable.${field}`, value);
+        return;
+      case "mcp":
+        if (field !== "terminalAccess") throw new Error(`Unknown setting ${key}.`);
+        // Kept in user settings only: a workspace must not be able to turn it on (the setting is machine-scoped).
+        await vscode.workspace.getConfiguration("ditfa").update("terminalAccess", value, vscode.ConfigurationTarget.Global);
         return;
       case "features": {
         const choice = value as { modelId: string | null; provider: string | null };
@@ -292,6 +301,19 @@ export class ControllerSettingsSource implements SettingsDataSource, vscode.Disp
   dispose(): void {
     this.emitter.dispose();
     for (const subscription of this.subscriptions) subscription.dispose();
+  }
+
+  private terminalStatus(): Pick<SettingsSnapshot["mcp"], "terminalAccess" | "terminalBridge" | "terminalBridgeError"> {
+    if (!this.bridge) {
+      const access = readTerminalAccess();
+      return { terminalAccess: access, terminalBridge: access === "off" ? "off" : "signedOut" };
+    }
+    const status = this.bridge.status;
+    return {
+      terminalAccess: status.access,
+      terminalBridge: status.state,
+      ...(status.error ? { terminalBridgeError: status.error } : {}),
+    };
   }
 
   private async updateAgent(field: string, value: unknown): Promise<void> {

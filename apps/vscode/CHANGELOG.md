@@ -3,6 +3,14 @@
 All notable changes to the Ditfa Code extension are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] — 2026-11-05
+
+### Added
+
+- **Terminal access for Ditfa.** Ditfa in the web app, the desktop app and Ditfa Code's own agent can list your editor's terminals, read what ran in them (commands, exit codes, output) and, if you allow it, run commands in a terminal you can see. Turn it on in Settings → MCP & tools → Terminal access: **Ask before running commands** shows each command, why it is wanted and who asks before anything runs; **Read and run without asking** skips the question. Off by default, uses your Ditfa sign-in, and never runs commands in Restricted Mode.
+- Output Ditfa reads has escape codes removed and obvious secrets (API keys, tokens, passwords, private keys) hidden before it leaves the editor.
+- A status bar entry shows whether terminal access is connected.
+
 ## [0.6.0] — 2026-11-05
 
 ### Added
