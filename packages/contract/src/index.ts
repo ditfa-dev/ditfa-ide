@@ -311,6 +311,8 @@ export interface DitfaAccountHeader {
   signedIn: boolean;
   /** Browser sign-in in progress: the panel shows a waiting card with Paste code and Cancel. */
   signInStep: "idle" | "waiting" | "exchanging";
+  /** Why the last sign-in did not finish, shown on the welcome screen. */
+  signInError: string | null;
   name: string | null;
   email: string | null;
   avatarUrl: string | null;

@@ -1791,6 +1791,7 @@ export class DitfaController implements vscode.Disposable {
     return {
       signedIn: view.signedIn,
       signInStep: view.signInStep,
+      signInError: view.signInError,
       name: view.user?.name ?? null,
       email: view.user?.email ?? null,
       avatarUrl: view.user?.image ?? null,

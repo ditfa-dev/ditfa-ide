@@ -119,6 +119,7 @@ const state: SessionState = {
     ditfa: {
       signedIn: false,
       signInStep: "idle",
+      signInError: null,
       name: null,
       email: null,
       avatarUrl: null,
@@ -188,6 +189,17 @@ let planOpen = true;
 let turnStartedAt = 0;
 let workingTimer = 0;
 let lastGate = "";
+/** The splash plays once when the panel opens on its setup screen, then hands over to onboarding. */
+const SPLASH_MS = 2100;
+let splashDone = false;
+window.setTimeout(() => {
+  splashDone = true;
+  lastGate = "";
+  renderGate();
+}, SPLASH_MS);
+/** Onboarding: the welcome page, or choosing an API key or a local model. */
+let onboardStep: "welcome" | "connect" = "welcome";
+let connectKind: "apiKey" | "local" = "apiKey";
 /** The setup row whose inline form is open: a provider's key, Ditfa's own key ("ditfa:key"), or a local server's help. */
 let setupForm: string | null = null;
 /** What is typed in the open key or code field. Written into the input after each render, never into markup. */
@@ -463,13 +475,22 @@ function firstUserText(): string | null {
 function renderGate(): void {
   const host = document.getElementById("gate") as HTMLElement;
   const { connection, connectionError, install, needsSetup, ditfa } = state.header;
-  const key = `${connection}|${connectionError ?? ""}|${needsSetup}|${install?.stage ?? ""}|${ditfa.signInStep}|${ditfa.signedIn}|${setupForm ?? ""}|${pasteOpen}|${gateError ?? ""}`;
+  const key = `${connection}|${connectionError ?? ""}|${needsSetup}|${install?.stage ?? ""}|${ditfa.signInStep}|${ditfa.signedIn}|${ditfa.signInError ?? ""}|${setupForm ?? ""}|${pasteOpen}|${gateError ?? ""}|${onboardStep}|${connectKind}|${splashDone}|${setupOptions.length}`;
 
   const show = connection !== "ready" || needsSetup;
   host.hidden = !show;
   document.getElementById("footer")?.classList.toggle("gated", show);
   if (!show) {
     lastGate = "";
+    // Already set up: no splash, straight to the chat.
+    splashDone = true;
+    return;
+  }
+  if (!splashDone && install === null && connection !== "missingBinary" && connection !== "unavailable") {
+    if (lastGate !== "splash") {
+      lastGate = "splash";
+      host.innerHTML = splashScreen();
+    }
     return;
   }
 
@@ -490,7 +511,7 @@ function renderGate(): void {
   }
   lastGate = key;
 
-  const lines = `<div class="moving-lines" aria-hidden="true">${"<span></span>".repeat(9)}</div>`;
+  const lines = "";
   switch (connection) {
     case "starting":
       host.innerHTML = `${lines}<div class="gate-body">${markSvg("assemble", "gate-mark")}<p class="gate-note">Starting the engine…</p></div>`;
@@ -542,11 +563,7 @@ function renderGate(): void {
         restoreGateDraft(host);
         break;
       }
-      host.innerHTML = `${lines}<div class="gate-body setup">${markSvg("assemble", "gate-mark")}
-        <h1>Welcome to Ditfa Code</h1>
-        <p>Sign in to use your Ditfa plan: every Ditfa model, Ditfa's tools in your projects, and voice. Or bring your own key or a local model.</p>
-        ${renderSetupOptions()}
-      </div>`;
+      host.innerHTML = onboardStep === "welcome" ? welcomeScreen() : connectScreen();
       restoreGateDraft(host);
       break;
   }
@@ -638,44 +655,99 @@ function submitGateField(field: string): void {
   rerenderForms();
 }
 
-function renderSetupOptions(): string {
-  if (setupOptions.length === 0) {
-    return `<p class="gate-note">Looking for what is available…</p>`;
-  }
-  const open = (id: string) => setupForm === id;
-  const row = (option: SetupOption) => {
-    // A local server that is not running opens its help instead of switching to a dead port.
-    const action = option.kind === "local" && option.ready ? `data-setup="${escapeHtml(option.id)}"` : `data-setup-form="${escapeHtml(option.id)}"`;
-    const form =
-      open(option.id) && option.kind === "apiKey"
-        ? inlineField({
-            field: "key",
-            placeholder: `Paste your ${option.label} API key`,
-            label: `${option.label} API key`,
-            submit: "Save",
-            note: "Kept in your system keychain, never in settings files.",
-            ...(KEY_PAGES[option.id] ? { link: KEY_PAGES[option.id] } : {}),
-          })
-        : open(option.id) && option.kind === "local"
-          ? localHelp(option)
-          : "";
-    return `<div class="setup-item${open(option.id) ? " open" : ""}">
-      <button class="setup-row" type="button" ${action} aria-expanded="${open(option.id)}">
-        <span class="setup-icon">${option.kind === "local" ? icons.cpu : icons.key}</span>
-        <span class="setup-text"><span>${escapeHtml(option.label)}</span><small>${escapeHtml(option.detail)}</small></span>
-        ${option.ready ? '<span class="status-dot"></span>' : `<span class="setup-chevron">${icons.chevron}</span>`}
-      </button>${form}</div>`;
-  };
-  const account = setupOptions.find((option) => option.kind === "account");
+/** The opening: the Ditfa mark assembles, the name writes itself, then onboarding takes over. */
+function splashScreen(): string {
+  const word = "Ditfa"
+    .split("")
+    .map((letter, index) => `<span style="--i:${index}">${letter}</span>`)
+    .join("");
+  return `<div class="splash" role="img" aria-label="Ditfa Code">
+    <div class="splash-glow" aria-hidden="true"></div>
+    ${markSvg("assemble", "splash-mark")}
+    <div class="splash-word" aria-hidden="true">${word}<span class="splash-code">Code</span></div>
+    <p class="splash-tag">Every model. One agent. Your code.</p>
+    <div class="splash-bar" aria-hidden="true"><span></span></div>
+  </div>`;
+}
+
+/** Onboarding, page one: what Ditfa Code is, and the one button most people need. */
+function welcomeScreen(): string {
+  const error = state.header.ditfa.signInError;
+  const feature = (icon: string, title: string, detail: string) =>
+    `<li><span class="ob-feature-icon">${icon}</span><span><strong>${escapeHtml(title)}</strong><small>${escapeHtml(detail)}</small></span></li>`;
+  return `<div class="ob ob-welcome">
+    <div class="ob-hero">
+      ${markSvg("none", "ob-mark")}
+      <h1>Welcome to Ditfa Code</h1>
+      <p>The coding agent that reads, edits and runs your project, and shows you every change before it lands.</p>
+    </div>
+    <ul class="ob-features">
+      ${feature(icons.sparkles, "Every top model in one place", "Your Ditfa plan, your own keys, or models on this computer")}
+      ${feature(icons.undo, "Nothing lands unseen", "Review each change, keep it or undo it, even without Git")}
+      ${feature(icons.table, "Talk, dictate, or ask a round table", "Voice, offline dictation, and several models on one task")}
+    </ul>
+    ${error ? `<p class="ob-error" role="alert">${icons.warn}<span>${escapeHtml(error)}</span></p>` : ""}
+    <div class="ob-actions">
+      <button class="primary large ob-cta" type="button" data-setup="ditfa">${icons.sparkles}<span>Sign in with Ditfa</span></button>
+      <button class="ob-secondary" type="button" data-ob-step="connect">Use my own API key or a local model</button>
+    </div>
+    <p class="ob-legal">Free plan available. Keys stay in your system keychain.</p>
+  </div>`;
+}
+
+/** Onboarding, page two: an API key or a model server on this computer, set up right here. */
+function connectScreen(): string {
   const keys = setupOptions.filter((option) => option.kind === "apiKey");
   const local = setupOptions.filter((option) => option.kind === "local");
-  return `
-    ${account ? `<button class="primary large" type="button" data-setup="${escapeHtml(account.id)}">${icons.sparkles}<span>${escapeHtml(account.label)}</span></button>
-      <p class="gate-note">${escapeHtml(account.detail)} <button class="link" type="button" data-setup-form="ditfa:key">I have a Ditfa API key</button></p>
-      ${open("ditfa:key") ? inlineField({ field: "key", placeholder: "Paste your Ditfa API key (dt-…)", label: "Ditfa API key", submit: "Save", note: "Kept in your system keychain.", link: KEY_PAGES["ditfa:key"] }) : ""}` : ""}
-    <h2>Your own API key</h2><div class="setup-list">${keys.map(row).join("")}</div>
-    <h2>On this machine</h2><div class="setup-list">${local.map(row).join("")}</div>
-  `;
+  const tabs = `<div class="ob-tabs" role="tablist">
+    <button class="ob-tab${connectKind === "apiKey" ? " on" : ""}" type="button" role="tab" aria-selected="${connectKind === "apiKey"}" data-ob-kind="apiKey">${icons.key}<span>API key</span></button>
+    <button class="ob-tab${connectKind === "local" ? " on" : ""}" type="button" role="tab" aria-selected="${connectKind === "local"}" data-ob-kind="local">${icons.cpu}<span>On this computer</span></button>
+  </div>`;
+  const pill = (option: SetupOption) =>
+    `<button class="ob-provider${setupForm === option.id ? " on" : ""}" type="button" data-setup-form="${escapeHtml(option.id)}" aria-pressed="${setupForm === option.id}">
+      <span class="ob-provider-dot${option.ready ? " ready" : ""}" aria-hidden="true"></span>${escapeHtml(option.label)}</button>`;
+  let body: string;
+  if (setupOptions.length === 0) {
+    body = `<p class="gate-note">${sparkle("Looking", 14)} Looking for what is available…</p>`;
+  } else if (connectKind === "apiKey") {
+    if (setupForm === null && keys[0]) {
+      // The first provider is chosen until the user picks another, so its form can be submitted.
+      setupForm = keys[0].id;
+    }
+    const chosen = keys.find((option) => option.id === setupForm) ?? (setupForm === "ditfa:key" ? null : keys[0]);
+    const form =
+      setupForm === "ditfa:key"
+        ? inlineField({ field: "key", placeholder: "Paste your Ditfa API key (dt-…)", label: "Ditfa API key", submit: "Connect", note: "Kept in your system keychain.", link: KEY_PAGES["ditfa:key"] })
+        : chosen
+          ? inlineField({
+              field: "key",
+              placeholder: `Paste your ${chosen.label} API key`,
+              label: `${chosen.label} API key`,
+              submit: "Connect",
+              note: "Kept in your system keychain, never in settings files.",
+              ...(KEY_PAGES[chosen.id] ? { link: KEY_PAGES[chosen.id] } : {}),
+            })
+          : "";
+    body = `<div class="ob-providers">${keys.map(pill).join("")}</div>${form}
+      <button class="link ob-small" type="button" data-setup-form="ditfa:key">I have a Ditfa API key</button>`;
+  } else {
+    body = `<div class="ob-locals">${local
+      .map(
+        (option) => `<div class="ob-local">
+          <span class="ob-local-icon">${icons.cpu}</span>
+          <span class="ob-local-text"><strong>${escapeHtml(option.label)}</strong><small class="${option.ready ? "ok" : ""}">${escapeHtml(option.ready ? "Running" : "Not running")}</small></span>
+          ${option.ready ? `<button class="primary small" type="button" data-setup="${escapeHtml(option.id)}">Use</button>` : `<button class="ghost-button" type="button" data-setup-form="${escapeHtml(option.id)}">How to start</button>`}
+        </div>${setupForm === option.id && !option.ready ? localHelp(option) : ""}`,
+      )
+      .join("")}</div>`;
+  }
+  return `<div class="ob ob-connect">
+    <button class="ob-back" type="button" data-ob-step="welcome">${icons.chevron}<span>Back</span></button>
+    <h1>Connect a model</h1>
+    <p class="ob-lead">Bring a key from a provider you already use, or run models on this computer.</p>
+    ${tabs}
+    <div class="ob-panel">${body}</div>
+  </div>`;
 }
 
 function localHelp(option: SetupOption): string {
@@ -1751,9 +1823,22 @@ function onDataClick(target: HTMLElement, hit: (selector: string) => HTMLElement
       entryId: undoFile.dataset.reviewEntry ?? "",
       path: undoFile.dataset.reviewPath ?? "",
     });
+  } else if (hit("[data-ob-step]")) {
+    onboardStep = hit("[data-ob-step]")?.dataset.obStep === "connect" ? "connect" : "welcome";
+    gateError = null;
+    setupForm = onboardStep === "connect" && connectKind === "apiKey" ? (setupOptions.find((option) => option.kind === "apiKey")?.id ?? null) : null;
+    lastGate = "";
+    renderGate();
+  } else if (hit("[data-ob-kind]")) {
+    connectKind = hit("[data-ob-kind]")?.dataset.obKind === "local" ? "local" : "apiKey";
+    setupForm = connectKind === "apiKey" ? (setupOptions.find((option) => option.kind === "apiKey")?.id ?? null) : null;
+    gateError = null;
+    lastGate = "";
+    renderGate();
   } else if (hit("[data-setup-form]")) {
     const id = hit("[data-setup-form]")?.dataset.setupForm ?? null;
-    openSetupForm(setupForm === id ? null : id);
+    // In onboarding a provider pill stays chosen; elsewhere a second click closes its form.
+    openSetupForm(setupForm === id && !hit(".ob-provider") ? null : id);
   } else if (hit("[data-gate-submit]")) {
     submitGateField(hit("[data-gate-submit]")?.dataset.gateSubmit ?? "key");
   } else if (hit("[data-setup-refresh]")) {

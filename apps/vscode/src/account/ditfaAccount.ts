@@ -45,6 +45,8 @@ export type SignInStep = "idle" | "waiting" | "exchanging";
 export interface DitfaAccountView {
   signedIn: boolean;
   signInStep: SignInStep;
+  /** Why the last sign-in did not finish, shown in the panel; null once a new attempt starts. */
+  signInError: string | null;
   user: CloudUser | null;
   plan: string | null;
   planLabel: string | null;
@@ -66,6 +68,7 @@ export class DitfaAccount implements vscode.Disposable {
   private stored: StoredSession | null = null;
   private profileCache: CloudProfile | null = null;
   private step: SignInStep = "idle";
+  private signInError: string | null = null;
   private pending: {
     signIn: PendingSignIn;
     settle: (code: string | Error) => void;
@@ -105,6 +108,7 @@ export class DitfaAccount implements vscode.Disposable {
     return {
       signedIn: this.signedIn,
       signInStep: this.step,
+      signInError: this.signInError,
       user: profile?.user ?? this.stored?.user ?? null,
       plan,
       planLabel: plan ? planLabel(plan) : null,
@@ -167,6 +171,20 @@ export class DitfaAccount implements vscode.Disposable {
       await vscode.env.openExternal(vscode.Uri.parse(this.pending.signIn.url));
       return false;
     }
+    // A second click while the server is being checked must not start a second attempt.
+    if (this.step !== "idle") return false;
+    this.signInError = null;
+    this.setStep("waiting");
+    // Never send the user to a page that cannot sign them in: ask the server first.
+    const available = await this.signInAvailable();
+    if (available !== true) {
+      this.signInError =
+        available === false
+          ? "Signing in from the editor is not available on Ditfa yet. Use an API key or a local model for now, and try again later."
+          : "Ditfa could not be reached. Check your connection, then try again.";
+      this.setStep("idle");
+      return false;
+    }
     const scheme = signInScheme(vscode.env.uriScheme, vscode.env.uiKind === vscode.UIKind.Web);
     const signIn = await beginSignIn(this.cloud.http, scheme);
     const code = new Promise<string | Error>((resolve) => {
@@ -190,7 +208,7 @@ export class DitfaAccount implements vscode.Disposable {
       if (scheme === PASTE_SCHEME) void this.pasteCode();
       const result = await code;
       if (result instanceof Error) {
-        if (result.message !== CANCELLED) void vscode.window.showWarningMessage(result.message);
+        if (result.message !== CANCELLED) this.signInError = result.message;
         return false;
       }
       this.setStep("exchanging");
@@ -204,12 +222,28 @@ export class DitfaAccount implements vscode.Disposable {
       return true;
     } catch (error) {
       this.logger.error("Ditfa sign-in failed", error);
-      void vscode.window.showErrorMessage(`Ditfa sign-in failed: ${describe(error)}`);
+      this.signInError = `Sign-in did not finish: ${describe(error)}`;
       return false;
     } finally {
       clearTimeout(timer);
       this.pending = null;
       this.setStep("idle");
+    }
+  }
+
+  /**
+   * Whether this Ditfa server signs editors in: its editor API answers 401 to a request without a session, and
+   * 404 before it exists. `null` when Ditfa could not be reached at all.
+   */
+  private async signInAvailable(): Promise<boolean | null> {
+    try {
+      const response = await fetch(this.cloud.http.url("/api/ide/me"), {
+        signal: AbortSignal.timeout(6000),
+        redirect: "manual",
+      });
+      return response.status !== 404;
+    } catch {
+      return null;
     }
   }
 
