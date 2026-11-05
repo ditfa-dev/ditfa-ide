@@ -198,15 +198,21 @@ function parseAction(raw: unknown, snapshot: SettingsSnapshot | null): SettingsA
       const provider = findProvider(snapshot, raw.providerId);
       return provider?.kind === "local" ? { type, providerId: provider.id } : `unknown local provider ${describe(raw.providerId)}`;
     }
-    case "setProviderKey":
+    case "setProviderKey": {
+      const provider = findProvider(snapshot, raw.providerId);
+      if (provider?.kind !== "apiKey") {
+        return `unknown key provider ${describe(raw.providerId)}`;
+      }
+      const key = typeof raw.key === "string" ? raw.key.trim() : "";
+      // Never echo the key itself in the reason: refusals are logged.
+      return isPlausibleKey(key) ? { type, providerId: provider.id, key } : "not a plausible API key";
+    }
     case "clearProviderKey": {
       const provider = findProvider(snapshot, raw.providerId);
       if (provider?.kind !== "apiKey") {
         return `unknown key provider ${describe(raw.providerId)}`;
       }
-      return type === "clearProviderKey" && !provider.hasKey
-        ? `no ${provider.id} key to remove`
-        : { type, providerId: provider.id };
+      return provider.hasKey ? { type, providerId: provider.id } : `no ${provider.id} key to remove`;
     }
     case "openLink":
       return typeof raw.url === "string" && isAllowedLink(snapshot, raw.url)
@@ -256,12 +262,24 @@ export function pendingKey(raw: unknown): string | undefined {
   return undefined;
 }
 
-/** Every page the panel may open: the snapshot's links and its upgrade offer, and only web pages among them. */
+/** One line of printable characters, the length API keys come in. */
+export function isPlausibleKey(key: string): boolean {
+  return key.length >= 8 && key.length <= 512 && /^[\x21-\x7e]+$/.test(key);
+}
+
+/**
+ * Every page the panel may open: the snapshot's links, its upgrade offer and the providers' key pages, and only web
+ * pages among them.
+ */
 export function allowedLinks(snapshot: SettingsSnapshot | null): Set<string> {
   if (!snapshot) {
     return new Set();
   }
-  const urls = [...Object.values(snapshot.links), ...(snapshot.upgrade ? [snapshot.upgrade.url] : [])];
+  const urls = [
+    ...Object.values(snapshot.links),
+    ...(snapshot.upgrade ? [snapshot.upgrade.url] : []),
+    ...snapshot.providers.flatMap((provider) => (provider.keyUrl ? [provider.keyUrl] : [])),
+  ];
   return new Set(urls.filter(isWebUrl));
 }
 

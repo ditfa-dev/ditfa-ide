@@ -231,7 +231,7 @@ export class DitfaAccount implements vscode.Disposable {
   }
 
   /** For editors that do not pass the link on: the sign-in page shows the code to paste. */
-  async pasteCode(): Promise<void> {
+  async pasteCode(given?: string): Promise<void> {
     if (!this.pending) {
       const start = await vscode.window.showInformationMessage(
         "Start signing in first: Ditfa opens the sign-in page, which shows the code to paste here.",
@@ -241,6 +241,12 @@ export class DitfaAccount implements vscode.Disposable {
       return;
     }
     const pending = this.pending;
+    if (given !== undefined) {
+      // From the panel's own field, which checks the shape before sending.
+      const code = parsePastedCode(given);
+      if (code && this.pending === pending) pending.settle(code);
+      return;
+    }
     const text = await vscode.window.showInputBox({
       title: "Paste the Ditfa sign-in code",
       prompt: "The code is on the sign-in page in your browser. It works once and expires after 2 minutes.",

@@ -167,15 +167,21 @@ describe("actions", () => {
   });
 
   it("checks provider ids against the snapshot", () => {
-    expect(action({ type: "setProviderKey", providerId: "openai" })).toMatchObject({ ok: true });
+    expect(action({ type: "setProviderKey", providerId: "openai", key: " sk-abc12345 " })).toEqual({
+      ok: true,
+      message: { type: "action", action: { type: "setProviderKey", providerId: "openai", key: "sk-abc12345" } },
+    });
+    expectRefused(action({ type: "setProviderKey", providerId: "openai" }), "no key");
+    expectRefused(action({ type: "setProviderKey", providerId: "openai", key: "short" }), "too short");
+    expectRefused(action({ type: "setProviderKey", providerId: "openai", key: "sk-has space123" }), "whitespace");
     expect(action({ type: "clearProviderKey", providerId: "deepseek" })).toMatchObject({ ok: true });
     expect(action({ type: "useLocalModel", providerId: "ollama" })).toMatchObject({ ok: true });
     expect(action({ type: "useLocalModel" })).toEqual({ ok: true, message: { type: "action", action: { type: "useLocalModel" } } });
-    expectRefused(action({ type: "setProviderKey", providerId: "evil" }), "unknown provider");
-    expectRefused(action({ type: "setProviderKey", providerId: "ollama" }), "a local server takes no key");
+    expectRefused(action({ type: "setProviderKey", providerId: "evil", key: "sk-abc12345" }), "unknown provider");
+    expectRefused(action({ type: "setProviderKey", providerId: "ollama", key: "sk-abc12345" }), "a local server takes no key");
     expectRefused(action({ type: "clearProviderKey", providerId: "openai" }), "no key stored");
     expectRefused(action({ type: "useLocalModel", providerId: "deepseek" }), "not a local server");
-    expectRefused(action({ type: "setProviderKey", providerId: "openai" }, null), "no snapshot");
+    expectRefused(action({ type: "setProviderKey", providerId: "openai", key: "sk-abc12345" }, null), "no snapshot");
   });
 
   it("checks MCP servers before they are added, switched or removed", () => {

@@ -12,7 +12,7 @@ import type {
   SettingsSnapshot,
 } from "@ditfa-ide/contract/settings";
 import type { DitfaController } from "@ditfa-ide/vscode/controller";
-import { BUILT_IN_PROVIDERS, probeLocal } from "@ditfa-ide/vscode/providers/providerRegistry";
+import { BUILT_IN_PROVIDERS, OPENAI_KEY_ENV, probeLocal, type ProviderInfo } from "@ditfa-ide/vscode/providers/providerRegistry";
 import type { Logger } from "@ditfa-ide/vscode/util/logger";
 import { permissionFromSettings, readSettings, resolveWorkspaceRoot, updateSetting } from "@ditfa-ide/vscode/util/settings";
 import type { SettingsDataSource, SettingsSourceAction } from "./settingsPanel";
@@ -220,12 +220,13 @@ export class ControllerSettingsSource implements SettingsDataSource, vscode.Disp
         await this.controller.setupProvider(action.providerId ?? "ollama");
         return;
       case "setProviderKey":
-        await this.controller.setupProvider(action.providerId);
+        await this.controller.saveProviderKey(action.providerId, action.key);
         this.emitter.fire();
         return;
       case "clearProviderKey": {
         const provider = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === action.providerId);
-        if (provider?.envKey) await this.controller.forgetKey(provider.envKey);
+        const env = provider ? keyEnv(provider) : null;
+        if (env) await this.controller.forgetKey(env);
         this.emitter.fire();
         return;
       }
@@ -317,8 +318,8 @@ export class ControllerSettingsSource implements SettingsDataSource, vscode.Disp
     return choices.map((choice) => ({
       id: choice.id,
       label: choice.label,
-      provider: "ditfa",
-      source: "subscription",
+      provider: choice.provider,
+      source: choice.source,
       capabilities: {
         vision: choice.capabilities?.vision ?? false,
         tools: choice.capabilities?.tools ?? true,
@@ -338,13 +339,15 @@ export class ControllerSettingsSource implements SettingsDataSource, vscode.Disp
           const up = provider.baseUrl ? await probeLocal(provider.baseUrl) : false;
           return { id: provider.id, name: provider.name, hasKey: false, ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}), kind: "local" as const, status: up ? ("ready" as const) : ("offline" as const) };
         }
-        const key = provider.envKey ? await this.controller.storedKey(provider.envKey) : undefined;
+        const env = keyEnv(provider);
+        const key = env ? await this.controller.storedKey(env) : undefined;
         return {
           id: provider.id,
           name: provider.name,
           hasKey: Boolean(key),
           ...(key ? { keyHint: `…${key.slice(-4)}` } : {}),
           ...(provider.baseUrl ? { baseUrl: provider.baseUrl } : {}),
+          ...(provider.keyUrl ? { keyUrl: provider.keyUrl } : {}),
           kind: "apiKey" as const,
           status: key ? ("ready" as const) : ("noKey" as const),
         };
@@ -385,4 +388,9 @@ function splitCommand(line: string): string[] {
     parts.push(match[1] ?? match[2] ?? match[3] ?? "");
   }
   return parts;
+}
+
+/** The keychain entry a provider's key is kept under; OpenAI's engine login has no variable, so it has its own. */
+function keyEnv(provider: ProviderInfo): string | null {
+  return provider.envKey ?? (provider.id === "openai" ? OPENAI_KEY_ENV : null);
 }

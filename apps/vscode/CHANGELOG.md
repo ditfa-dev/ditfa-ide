@@ -3,6 +3,27 @@
 All notable changes to the Ditfa Code extension are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.6.0] — 2026-11-05
+
+### Added
+
+- **A real round table.** The models sit around a round table you can see: each has its own color, the leader wears a crown, and while the table works every seat shows whether it is thinking, done or failed. What each model says reads like a conversation, the peer ranking is a bar chart, and the leader's answer stands out at the end.
+- **Seat models from Settings → Round table.** Click any model to seat it and a seat to free it; models are grouped by provider, and the table you set is where the next round table starts.
+- **Models from every provider at the round table and in Settings**: Ditfa, each API key you added (OpenAI included), local servers, and providers from your Ditfa config.
+- **The model menu switches providers itself.** Tabs for Ditfa, OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Ollama and LM Studio show which ones are ready; a provider that is not set up shows its key form, sign-in or start command right there.
+- **A new composer**, like Ditfa on the web: a soft rounded box; a menu for files, commands, references, the open file, round table and settings; the model with ⌃⌄; and voice mode in the send button's place while the box is empty.
+- **Attach files from the system file dialog** and the open file or selection from the composer menu.
+
+### Changed
+
+- API keys and the sign-in code are typed into the panel itself, in the setup screen, the model menu and Settings; no input box opens at the top of the editor anymore. Keys still go only to the system keychain.
+- Ollama and LM Studio count as ready only while they answer: a message is no longer sent to a local server that is not running, and the panel shows how to start it instead.
+
+### Fixed
+
+- OpenAI keys work at the round table and show as saved in Settings.
+- Settings listed no models without a Ditfa sign-in.
+
 ## [0.5.1] — 2026-11-05
 
 ### Changed

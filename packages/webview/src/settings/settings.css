@@ -4,6 +4,8 @@
  * means something: the mark, the main calls to action and the usage bars, and
  * high-contrast themes trade even those for the theme's own contrast colors.
  */
+@import "../roundtable.css";
+
 :root {
   --ditfa-sky: #7cc0ec;
   --ditfa-blue: #4f94c5;
@@ -390,6 +392,34 @@ kbd,
 }
 .btn.ghost {
   color: var(--muted);
+}
+.btn.link {
+  display: inline;
+  height: auto;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--vscode-textLink-foreground, var(--accent));
+  font-weight: inherit;
+}
+.btn.link:hover {
+  background: none;
+  text-decoration: underline;
+}
+.row.has-form {
+  align-items: flex-start;
+}
+.key-form {
+  display: flex;
+  gap: 8px;
+  margin-top: 10px;
+}
+.key-form .input {
+  flex: 1;
+  min-width: 0;
+}
+.key-note {
+  margin-top: 6px;
 }
 .btn.ghost:hover {
   background: var(--hover);
@@ -1319,4 +1349,77 @@ body.vscode-high-contrast-light .moving-lines {
   .form-grid {
     grid-template-columns: 1fr;
   }
+}
+
+/* Round table: the table and who can join it */
+.round-table-editor {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  margin-top: 6px;
+}
+.round-table-editor .rt-table {
+  --bg: var(--vscode-editor-background);
+}
+.pick-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.pick-group-title {
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.seat-pick {
+  gap: 7px;
+  padding-inline-start: 4px;
+}
+.seat-pick input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+.seat-pick-avatar {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: 1.5px solid color-mix(in srgb, var(--seat) 60%, transparent);
+  color: var(--seat);
+  font-size: 9px;
+  font-weight: 700;
+}
+.seat-pick.on {
+  border-color: var(--seat);
+  background: color-mix(in srgb, var(--seat) 12%, transparent);
+}
+.seat-pick.on .seat-pick-avatar {
+  background: var(--seat);
+  color: #fff;
+}
+.seat-pick:focus-within {
+  outline: 1px solid var(--vscode-focusBorder);
+}
+.table-empty {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 10px;
+  text-align: center;
+  color: var(--muted);
+}
+.table-empty p {
+  margin: 0;
+  max-width: 420px;
+}
+.table-empty-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: center;
+  gap: 8px;
 }

@@ -49,6 +49,9 @@ let loadError: string | null = null;
 let section: SectionId = "account";
 let query = "";
 let confirmingRemoval: string | null = null;
+/** The open key form. The key itself stays out of state that renders: only the input holds it. */
+let keyForm: { providerId: string; error: string | null } | null = null;
+let keyDraft = "";
 let mcpForm: McpForm = { name: "", transport: "stdio", target: "" };
 let announceTimer = 0;
 let resultCount = 0;
@@ -142,7 +145,7 @@ function effective(): SettingsSnapshot | null {
 
 function viewContext(): ViewContext | null {
   const view = effective();
-  return view && { snapshot: view, busy, drafts, errors, mcpForm, confirmingRemoval, now: Date.now() };
+  return view && { snapshot: view, busy, drafts, errors, mcpForm, confirmingRemoval, keyForm, now: Date.now() };
 }
 
 function render(): void {
@@ -157,7 +160,25 @@ function render(): void {
   for (const image of content.querySelectorAll<HTMLImageElement>("img[data-avatar]")) {
     image.addEventListener("error", () => image.remove(), { once: true });
   }
+  // The key is written into the input after rendering, never into markup.
+  const keyInput = content.querySelector<HTMLInputElement>("input[data-key-input]");
+  if (keyInput) {
+    keyInput.value = keyDraft;
+  }
   restoreFocus(focus);
+}
+
+function openKeyForm(providerId: string): void {
+  keyForm = { providerId, error: null };
+  keyDraft = "";
+  render();
+  content.querySelector<HTMLInputElement>("input[data-key-input]")?.focus();
+}
+
+function closeKeyForm(): void {
+  keyForm = null;
+  keyDraft = "";
+  render();
 }
 
 function placeholder(): string {
@@ -268,6 +289,21 @@ function onClick(event: MouseEvent): void {
     return;
   }
 
+  const freeSeat = hit("[data-participant-remove]")?.dataset.participantRemove;
+  if (freeSeat !== undefined) {
+    toggleParticipant(freeSeat, false);
+    return;
+  }
+  const keyOpen = hit("[data-key-open]")?.dataset.keyOpen;
+  if (keyOpen) {
+    openKeyForm(keyOpen);
+    return;
+  }
+  if (hit("[data-key-cancel]")) {
+    closeKeyForm();
+    return;
+  }
+
   const actionButton = hit("button[data-action]");
   const name = actionButton?.dataset.action;
   if (!actionButton || !name) {
@@ -310,10 +346,11 @@ function actionFrom(element: HTMLElement): SettingsAction | null {
     case "useLocalModel":
       return providerId ? { type: action, providerId } : { type: action };
     case "setProviderKey":
+      return providerId ? keyToSave(providerId) : null;
     case "clearProviderKey":
       return providerId ? { type: action, providerId } : null;
     case "openLink": {
-      const url = linkUrl(link);
+      const url = element.dataset.keyUrl ? keyPageUrl(element.dataset.keyUrl) : linkUrl(link);
       return url ? { type: action, url } : null;
     }
     case "removeMcpServer":
@@ -334,6 +371,23 @@ function linkUrl(link: string | undefined): string | null {
     return snapshot.upgrade?.url ?? null;
   }
   return Object.hasOwn(snapshot.links, link) ? snapshot.links[link as keyof SettingsLinks] : null;
+}
+
+/** The key in the open form, checked before it leaves the panel; the form closes once it is on its way. */
+function keyToSave(providerId: string): SettingsAction | null {
+  const key = keyDraft.trim();
+  if (key.length < 8 || key.length > 512 || /\s/.test(key)) {
+    keyForm = { providerId, error: key ? "That does not look like an API key." : "Paste the key first." };
+    return null;
+  }
+  keyForm = null;
+  keyDraft = "";
+  return { type: "setProviderKey", providerId, key };
+}
+
+/** A provider's key page, only when the snapshot lists it. */
+function keyPageUrl(url: string): string | null {
+  return snapshot?.providers.some((provider) => provider.keyUrl === url) ? url : null;
 }
 
 function serverToAdd(): SettingsAction | null {
@@ -462,6 +516,10 @@ function onInput(event: Event): void {
     return;
   }
   // Typing only updates state; the markup catches up on the next render, which keeps the caret and IME alone.
+  if (target.dataset.keyInput !== undefined) {
+    keyDraft = target.value;
+    return;
+  }
   const field = target.dataset.mcpField;
   if (field === "name" || field === "target") {
     mcpForm = { ...mcpForm, [field]: target.value };
@@ -473,6 +531,23 @@ function onInput(event: Event): void {
 function onKeydown(event: KeyboardEvent): void {
   const target = event.target as HTMLElement;
   const typing = target instanceof HTMLInputElement || target instanceof HTMLSelectElement;
+
+  if (target instanceof HTMLInputElement && target.dataset.keyInput !== undefined) {
+    if (event.key === "Enter") {
+      event.preventDefault();
+      const action = keyToSave(target.dataset.keyInput);
+      if (action) {
+        dispatch(action);
+      }
+      render();
+      return;
+    }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      closeKeyForm();
+      return;
+    }
+  }
 
   if ((event.key === "/" && !typing) || (event.key.toLowerCase() === "f" && (event.metaKey || event.ctrlKey))) {
     event.preventDefault();

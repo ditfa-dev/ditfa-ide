@@ -26,6 +26,7 @@ import {
   BUILT_IN_PROVIDERS,
   PROVIDER_ENV_KEYS,
   probeLocal,
+  OPENAI_KEY_ENV,
   ProviderRegistry,
   type ProviderInfo,
 } from "@ditfa-ide/vscode/providers/providerRegistry";
@@ -48,6 +49,7 @@ import type {
   InstallProgress,
   ModelCapabilitiesView,
   ModelCatalog,
+  ProviderTab,
   ModelChoice,
   PermissionLevel,
   QueuedMessage,
@@ -104,6 +106,9 @@ const BUILTIN_COMMANDS: SlashCommand[] = [
  * Nothing starts until the panel is opened or a command needs it; an editor
  * window the user never asks anything in costs no engine process.
  */
+/** Models listed per provider in the settings panel; enough to pick from without flooding the round table. */
+const SETTINGS_MODELS_PER_PROVIDER = 24;
+
 export class DitfaController implements vscode.Disposable {
   private client: AppServerClient | undefined;
   private binary: ResolvedBinary | null = null;
@@ -187,6 +192,8 @@ export class DitfaController implements vscode.Disposable {
       ditfa: this.ditfa,
       keys: this.keys,
       logger,
+      providers: () => this.providerChoices(),
+      participants: () => vscode.workspace.getConfiguration("ditfa").get<string[]>("roundtable.participants", []) ?? [],
       listModels: async (provider, apiKey) => {
         await this.connect();
         const models = (await this.providers?.listModels(provider, apiKey)) ?? [];
@@ -410,6 +417,13 @@ export class DitfaController implements vscode.Disposable {
       return;
     }
 
+    // Nothing can answer yet (signed out, no key, local server stopped): the header update shows the panel's
+    // sign-in and setup screen instead of a turn that fails on the wire.
+    await this.refreshProviderReady();
+    if (!this.providerReady) {
+      return;
+    }
+
     const settings = readSettings();
     const mode = settings.chatMode;
     const active = includeActiveFile && settings.attachActiveFile ? this.activeFileContext() : null;
@@ -538,15 +552,24 @@ export class DitfaController implements vscode.Disposable {
   }
 
   /** The models the Settings panel lists: what the editor's Ditfa key can call, with plan locks. */
-  async settingsModels(): Promise<ModelChoice[]> {
-    if (!this.ditfa.signedIn) return [];
-    try {
-      const models = await this.ditfaModelChoices();
-      this.rememberCapabilities(models);
-      return models;
-    } catch {
-      return [];
-    }
+  /**
+   * Models of every provider that can answer now (Ditfa's plan, each stored key, each running local server), for
+   * the settings panel's model pickers and the round table. A provider whose list fails is left out, not fatal.
+   */
+  async settingsModels(): Promise<(ModelChoice & { provider: string; source: "subscription" | "apiKey" | "local" })[]> {
+    const tabs = (await this.providerTabs()).filter((tab) => tab.ready);
+    const lists = await Promise.all(
+      tabs.map(async (tab) => {
+        try {
+          const catalog = await this.modelCatalog(tab.id);
+          const source = tab.kind === "account" ? ("subscription" as const) : tab.kind === "local" ? ("local" as const) : ("apiKey" as const);
+          return catalog.models.slice(0, SETTINGS_MODELS_PER_PROVIDER).map((model) => ({ ...model, provider: tab.id, source }));
+        } catch {
+          return [];
+        }
+      }),
+    );
+    return lists.flat();
   }
 
   queueRemove(id: string): void {
@@ -1027,8 +1050,54 @@ export class DitfaController implements vscode.Disposable {
     return options;
   }
 
+  /**
+   * A key typed in the panel (`given`), or one asked for with an input box when a command started this from the
+   * Command Palette. Empty input is no key.
+   */
+  private async keyFor(given: string | undefined, title: string, prompt: string): Promise<string | null> {
+    if (given !== undefined) {
+      const key = given.trim();
+      return key.length >= 8 && key.length <= 512 && !/\s/.test(key) ? key : null;
+    }
+    const typed = await vscode.window.showInputBox({
+      title,
+      prompt,
+      password: true,
+      ignoreFocusOut: true,
+      validateInput: (value) => (value.trim().length === 0 ? "Enter an API key" : undefined),
+    });
+    return typed?.trim() || null;
+  }
+
+  /** Checks again whether anything can answer (a local server that just started, a key added elsewhere). */
+  async refreshSetup(): Promise<void> {
+    await this.refreshProviderReady();
+  }
+
+  /**
+   * Saves a key typed into the settings panel without switching the chat's provider: adding a key there
+   * (for the round table, say) should not move the conversation to that provider.
+   */
+  async saveProviderKey(id: string, key: string): Promise<void> {
+    const provider = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === id && candidate.kind === "apiKey");
+    const apiKey = provider ? await this.keyFor(key, "", "") : null;
+    if (!provider || !apiKey) {
+      throw new Error("That does not look like an API key.");
+    }
+    if (provider.envKey) {
+      await this.keys.set(provider.envKey, apiKey);
+    } else {
+      await this.account?.saveOpenAiKey(apiKey);
+    }
+    // A first provider makes the chat usable right away; otherwise the user picks it from the model menu.
+    await this.refreshProviderReady();
+    if (!this.providerReady) {
+      await this.activateProvider(provider);
+    }
+  }
+
   /** Makes `id` the active provider, collecting whatever it needs first. */
-  async setupProvider(id: string): Promise<void> {
+  async setupProvider(id: string, givenKey?: string): Promise<void> {
     const provider = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === id);
     if (!provider) {
       return;
@@ -1040,30 +1109,34 @@ export class DitfaController implements vscode.Disposable {
     }
 
     if (provider.kind === "apiKey") {
-      const apiKey = await vscode.window.showInputBox({
-        title: `${provider.name} API key`,
-        prompt: provider.keyUrl
-          ? `Stored in your system keychain. Create one at ${provider.keyUrl}`
-          : "Stored in your system keychain",
-        password: true,
-        ignoreFocusOut: true,
-        validateInput: (value) => (value.trim().length === 0 ? "Enter an API key" : undefined),
-      });
+      const apiKey = await this.keyFor(
+        givenKey,
+        `${provider.name} API key`,
+        provider.keyUrl ? `Stored in your system keychain. Create one at ${provider.keyUrl}` : "Stored in your system keychain",
+      );
       if (!apiKey) {
         return;
       }
       if (provider.envKey) {
-        await this.keys.set(provider.envKey, apiKey.trim());
+        await this.keys.set(provider.envKey, apiKey);
       } else {
-        await this.account?.saveOpenAiKey(apiKey.trim());
+        await this.account?.saveOpenAiKey(apiKey);
+        // The engine keeps OpenAI's key in its own login; the round table and Tab read it from the keychain.
+        await this.keys.set(OPENAI_KEY_ENV, apiKey);
       }
+    }
+
+    if (provider.kind === "local" && provider.baseUrl && !(await probeLocal(provider.baseUrl))) {
+      // Switching to a server that is not running would only fail on the next message.
+      void vscode.window.showWarningMessage(`${provider.name} is not running at ${provider.baseUrl}. Start it, then choose it again.`);
+      return;
     }
 
     await this.activateProvider(provider);
   }
 
   /** Signing in to Ditfa happens in the browser; a pasted Ditfa API key is the alternative. */
-  private async setupDitfaAccount(provider: ProviderInfo, method: "browser" | "key" = "browser"): Promise<void> {
+  private async setupDitfaAccount(provider: ProviderInfo, method: "browser" | "key" = "browser", givenKey?: string): Promise<void> {
     if (method === "browser") {
       if (await this.ditfa.signIn()) {
         await this.activateProvider(provider);
@@ -1071,15 +1144,9 @@ export class DitfaController implements vscode.Disposable {
       return;
     }
     if (provider.envKey) {
-      const apiKey = await vscode.window.showInputBox({
-        title: "Ditfa API key",
-        prompt: "Stored in your system keychain. Create one at chat.ditfa.com/api-keys",
-        password: true,
-        ignoreFocusOut: true,
-        validateInput: (value) => (value.trim().length === 0 ? "Enter an API key" : undefined),
-      });
+      const apiKey = await this.keyFor(givenKey, "Ditfa API key", "Stored in your system keychain. Create one at chat.ditfa.com/api-keys");
       if (apiKey) {
-        await this.keys.set(provider.envKey, apiKey.trim());
+        await this.keys.set(provider.envKey, apiKey);
         await this.activateProvider(provider);
       }
     }
@@ -1092,10 +1159,10 @@ export class DitfaController implements vscode.Disposable {
     }
   }
 
-  async useDitfaKey(): Promise<void> {
+  async useDitfaKey(key?: string): Promise<void> {
     const provider = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === "ditfa");
     if (provider) {
-      await this.setupDitfaAccount(provider, "key");
+      await this.setupDitfaAccount(provider, "key", key);
     }
   }
 
@@ -1139,14 +1206,49 @@ export class DitfaController implements vscode.Disposable {
     return (await this.providers?.listProviders(resolveWorkspaceRoot())) ?? BUILT_IN_PROVIDERS;
   }
 
-  async modelCatalog(): Promise<ModelCatalog> {
+  /** Every provider as a tab of the model menu, with whether it can answer now. */
+  async providerTabs(): Promise<ProviderTab[]> {
+    const providers = await this.providerChoices();
+    return Promise.all(
+      providers.map(async (provider): Promise<ProviderTab> => {
+        const builtIn = BUILT_IN_PROVIDERS.some((candidate) => candidate.id === provider.id);
+        let ready: boolean;
+        if (provider.kind === "account") {
+          ready = this.ditfa.signedIn || (provider.envKey ? await this.keys.has(provider.envKey) : false);
+        } else if (provider.kind === "local") {
+          ready = provider.baseUrl ? await probeLocal(provider.baseUrl) : false;
+        } else if (provider.envKey) {
+          ready = (await this.keys.has(provider.envKey)) || Boolean(process.env[provider.envKey]);
+        } else {
+          // OpenAI keeps its key in the engine's own login; a custom provider brings its own settings.
+          ready = provider.id === "openai" ? Boolean(this.account?.current.account) || (await this.keys.has("OPENAI_API_KEY")) : !builtIn;
+        }
+        return {
+          id: provider.id,
+          label: provider.name,
+          kind: builtIn ? provider.kind : "custom",
+          ready,
+          ...(provider.keyUrl ? { keyUrl: provider.keyUrl } : {}),
+          ...(provider.baseUrl && provider.kind === "local" ? { baseUrl: provider.baseUrl } : {}),
+        };
+      }),
+    );
+  }
+
+  async modelCatalog(providerId?: string): Promise<ModelCatalog> {
     await this.connect();
     const providers = await this.providerChoices();
-    const id = this.effectiveProviderId();
+    const activeProvider = this.effectiveProviderId();
+    const id = providerId ?? activeProvider;
     const provider = providers.find((candidate) => candidate.id === id) ?? null;
-    const base = { provider: id, providerLabel: provider?.name ?? null };
+    const tabs = await this.providerTabs();
+    const base = { provider: id, providerLabel: provider?.name ?? null, activeProvider, providers: tabs };
     if (!this.providers) {
       return { ...base, models: [], error: "The Ditfa engine is not running." };
+    }
+    if (provider && !tabs.find((tab) => tab.id === provider.id)?.ready) {
+      // The menu shows the provider's own setup (key form, sign-in, local help) instead of a failed request.
+      return { ...base, models: [], error: null };
     }
     if (provider?.id === "ditfa" && this.ditfa.signedIn) {
       try {
@@ -1200,11 +1302,25 @@ export class DitfaController implements vscode.Disposable {
     this.pushHeader();
   }
 
-  /** A model change applies to the next message; the conversation carries on. */
-  async selectModel(model: string, effort: string | null): Promise<void> {
+  /**
+   * A model change applies to the next message; the conversation carries on. A model of another provider moves
+   * the chat to that provider first, which starts a new conversation (a thread keeps its provider).
+   */
+  async selectModel(model: string, effort: string | null, providerId?: string): Promise<void> {
+    if (providerId && providerId !== this.effectiveProviderId()) {
+      const provider = (await this.providerChoices()).find((candidate) => candidate.id === providerId);
+      if (!provider) {
+        return;
+      }
+      await updateSetting("provider", provider.id);
+      this.providers?.invalidate();
+      if (this.session?.threadId) {
+        await this.newThread();
+      }
+    }
     await updateSetting("model", model);
     await updateSetting("reasoningEffort", effort ?? "");
-    this.pushHeader();
+    await this.refreshProviderReady();
   }
 
   /** A provider is fixed for the life of a thread, so changing it starts a new one. */
@@ -1727,7 +1843,9 @@ export class DitfaController implements vscode.Disposable {
       // A custom provider from config.toml: the user has already set it up.
       ready = Boolean(id) || signedIn;
     } else if (provider.kind === "local") {
-      ready = true;
+      // A local server counts only while it answers; otherwise the panel offers sign-in and keys
+      // instead of sending turns to a port nothing listens on.
+      ready = provider.baseUrl ? await probeLocal(provider.baseUrl) : false;
     } else if (provider.envKey) {
       ready =
         signedIn ||

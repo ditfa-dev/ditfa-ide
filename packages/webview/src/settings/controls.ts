@@ -151,7 +151,7 @@ export function radios(
 
 export interface ButtonOptions {
   focus: string;
-  variant?: "primary" | "brand" | "secondary" | "ghost" | "danger";
+  variant?: "primary" | "brand" | "secondary" | "ghost" | "danger" | "link";
   icon?: string;
   /** Shows a spinner. The button stays focusable, so focus is not lost while the host works. */
   busy?: boolean;

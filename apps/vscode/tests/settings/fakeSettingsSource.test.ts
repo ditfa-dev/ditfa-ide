@@ -70,7 +70,7 @@ describe("FakeSettingsSource", () => {
 
   it("stores and clears a provider key, keeping only a hint", async () => {
     const source = new FakeSettingsSource({ now: NOW });
-    await source.action({ type: "setProviderKey", providerId: "openai" });
+    await source.action({ type: "setProviderKey", providerId: "openai", key: "sk-test-0000" });
     expect((await source.snapshot()).providers[0]).toMatchObject({ id: "openai", hasKey: true, status: "ready" });
     await source.action({ type: "clearProviderKey", providerId: "openai" });
     expect((await source.snapshot()).providers[0]).toMatchObject({ id: "openai", hasKey: false, status: "noKey" });

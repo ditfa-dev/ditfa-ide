@@ -35,6 +35,8 @@ export interface ViewContext {
   mcpForm: McpForm;
   /** The MCP server whose Remove button is waiting for a second click. */
   confirmingRemoval: string | null;
+  /** The provider whose key form is open, and the reason its last key was refused. */
+  keyForm: { providerId: string; error: string | null } | null;
   now: number;
 }
 

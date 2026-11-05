@@ -108,6 +108,7 @@ export function context(state: SettingsSnapshot = snapshot(), overrides: Partial
     errors: new Map(),
     mcpForm: { name: "", transport: "stdio", target: "" },
     confirmingRemoval: null,
+    keyForm: null,
     now: NOW,
     ...overrides,
   };

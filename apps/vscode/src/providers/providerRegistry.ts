@@ -94,6 +94,9 @@ export const BUILT_IN_PROVIDERS: ProviderInfo[] = [
   },
 ];
 
+/** Where OpenAI's key is kept for direct calls (round table, Tab): the engine itself keeps it in its own login. */
+export const OPENAI_KEY_ENV = "OPENAI_API_KEY";
+
 /** Every variable the engine might read a stored key from. */
 export const PROVIDER_ENV_KEYS = BUILT_IN_PROVIDERS.flatMap((provider) =>
   provider.envKey ? [provider.envKey] : [],

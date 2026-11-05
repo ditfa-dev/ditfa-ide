@@ -453,9 +453,26 @@ export interface ModelChoice {
   requiredPlan?: string | null;
 }
 
+/** A provider as the model menu shows it: a tab, with whether it can answer right now. */
+export interface ProviderTab {
+  id: string;
+  label: string;
+  kind: "account" | "apiKey" | "local" | "custom";
+  /** Signed in, a key stored, or the local server answered. */
+  ready: boolean;
+  /** Where to create a key, for the inline key form. */
+  keyUrl?: string;
+  /** The URL a local server is expected on, for the inline help. */
+  baseUrl?: string;
+}
+
 export interface ModelCatalog {
+  /** The provider these models belong to (the menu's open tab). */
   provider: string | null;
   providerLabel: string | null;
+  /** The provider new messages use. */
+  activeProvider: string | null;
+  providers: ProviderTab[];
   models: ModelChoice[];
   /** Filled in when the catalog could not be fetched. */
   error: string | null;
@@ -547,13 +564,16 @@ export type WebviewMessage =
   | { type: "undoFile"; entryId: string; path: string }
   | { type: "openFile"; path: string; line?: number }
   | { type: "openExternal"; url: string }
-  | { type: "selectModel"; model: string; effort: string | null }
+  /** `provider` switches the chat to that provider first (a new conversation) when it is not the active one. */
+  | { type: "selectModel"; model: string; effort: string | null; provider?: string }
   | { type: "selectProvider" }
-  | { type: "requestModels" }
+  /** `provider` lists another provider's models, for the menu's tabs; without it the active one. */
+  | { type: "requestModels"; provider?: string }
   | { type: "setChatMode"; mode: ChatMode }
   | { type: "setPermission"; level: PermissionLevel }
   | { type: "signIn" }
-  | { type: "setupProvider"; id: string }
+  /** `key` comes from the panel's own key form; without it the host asks (Command Palette paths). */
+  | { type: "setupProvider"; id: string; key?: string }
   | { type: "showAccount" }
   | { type: "showLogs" }
   | { type: "openSettings" }
@@ -568,7 +588,14 @@ export type WebviewMessage =
   | { type: "copy"; text: string }
   | { type: "webviewError"; message: string }
   | { type: "signOut" }
-  | { type: "pasteSignInCode" }
+  /** The composer's Files item: the system file dialog, then each pick arrives as `composerAttach`. */
+  | { type: "pickFiles" }
+  /** The composer's Selection item: the active editor's selection, or its whole file. */
+  | { type: "attachActiveEditor" }
+  /** The setup screen's "Check again": probe local servers and keys anew. */
+  | { type: "requestSetupOptions" }
+  /** `code` comes from the panel's own field; without it the host asks. */
+  | { type: "pasteSignInCode"; code?: string }
   | { type: "cancelSignIn" }
   | { type: "openProfile" }
   | { type: "openUpgrade" }

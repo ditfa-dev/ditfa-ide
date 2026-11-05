@@ -18,13 +18,17 @@ import type { RoundTableEntry, RoundTableLane, RoundTableOption } from "@ditfa-i
 import type { ApiKeys } from "@ditfa-ide/vscode/account/apiKeys";
 import type { DitfaAccount } from "@ditfa-ide/vscode/account/ditfaAccount";
 import { DITFA_ENGINE_ENV } from "@ditfa-ide/vscode/account/ditfaAccount";
-import { BUILT_IN_PROVIDERS, probeLocal, type ProviderInfo } from "@ditfa-ide/vscode/providers/providerRegistry";
+import { OPENAI_KEY_ENV, probeLocal, type ProviderInfo } from "@ditfa-ide/vscode/providers/providerRegistry";
 import type { Logger } from "@ditfa-ide/vscode/util/logger";
 
 export interface RoundTableDeps {
   ditfa: DitfaAccount;
   keys: ApiKeys;
   logger: Logger;
+  /** Built-in providers plus any from the user's Ditfa config, so models of other providers can sit too. */
+  providers(): Promise<ProviderInfo[]>;
+  /** Model ids seated by default (settings: Round table → At the table). */
+  participants(): string[];
   /** Model ids a provider offers (its /models list), best first. */
   listModels(provider: ProviderInfo, apiKey: string | undefined): Promise<{ id: string; label: string }[]>;
   /** Shows or updates the table's row in the transcript. */
@@ -99,10 +103,11 @@ export class RoundTableService implements vscode.Disposable {
       }
     }
 
+    const providers = await this.deps.providers();
     await Promise.all(
-      BUILT_IN_PROVIDERS.filter((provider) => provider.id !== "ditfa" && provider.baseUrl).map(async (provider) => {
+      providers.filter((provider) => provider.id !== "ditfa" && provider.baseUrl).map(async (provider) => {
         try {
-          const apiKey = provider.envKey ? await this.deps.keys.get(provider.envKey) : undefined;
+          const apiKey = await this.keyFor(provider);
           if (provider.kind === "apiKey" && !apiKey) return;
           if (provider.kind === "local" && !(await probeLocal(provider.baseUrl ?? ""))) return;
           const models = await this.deps.listModels(provider, apiKey);
@@ -118,9 +123,14 @@ export class RoundTableService implements vscode.Disposable {
     );
 
     options.sort((a, b) => b.score - a.score);
+    // The table set in settings comes first; otherwise the strongest models, one per family.
+    const chosen = this.deps
+      .participants()
+      .map((id) => options.find((option) => option.ref.slice(option.provider.length + 1) === id)?.ref)
+      .filter((ref): ref is string => Boolean(ref));
     return {
       options,
-      suggested: suggest(options),
+      suggested: chosen.length >= 2 ? chosen : suggest(options),
       error: options.length === 0 ? (errors[0] ?? "Sign in to Ditfa or add an API key to seat models at the table.") : null,
     };
   }
@@ -287,15 +297,22 @@ export class RoundTableService implements vscode.Disposable {
     if (provider === "ditfa") {
       return { kind: "openai-compatible", baseUrl: DITFA_MODELS_URL, apiKey: (await this.deps.keys.get(DITFA_ENGINE_ENV)) ?? null, model: id };
     }
-    const info = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === provider);
+    const info = (await this.deps.providers()).find((candidate) => candidate.id === provider);
     if (!info?.baseUrl) throw new Error(`Unknown provider ${provider}.`);
-    const apiKey = info.envKey ? ((await this.deps.keys.get(info.envKey)) ?? null) : null;
+    const apiKey = (await this.keyFor(info)) ?? null;
     return {
       kind: provider === "anthropic" ? "anthropic" : "openai-compatible",
       baseUrl: info.baseUrl,
       apiKey,
       model: id,
     };
+  }
+
+  /** A provider's key: the keychain, then the environment (custom providers name their own variable). */
+  private async keyFor(provider: ProviderInfo): Promise<string | undefined> {
+    const env = provider.envKey ?? (provider.id === "openai" ? OPENAI_KEY_ENV : null);
+    if (!env) return undefined;
+    return (await this.deps.keys.get(env)) ?? process.env[env] ?? undefined;
   }
 
   private onEvent(entryId: string, event: TableEvent): void {

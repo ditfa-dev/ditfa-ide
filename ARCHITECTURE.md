@@ -33,7 +33,7 @@ Each package is TypeScript, published inside the repository as `@ditfa-ide/<name
 - **core**: logic with no editor dependency: diff parsing and word-level rows, hunk revert, checkpoints, completion prompts, quick-fix windows and parsing, the message queue, modes, transcript storage, speech detection. A `Logger` interface replaces the output channel.
 - **cloud**: the Ditfa API client: PKCE sign-in and code exchange, profile and usage, model catalog, voice (transcribe, synthesize, socket), and a streaming chat client for OpenAI-compatible and Anthropic endpoints. Uses `fetch` only, with timeouts, no redirects, and typed errors (`planRequired`, `unauthorized`).
 - **roundtable**: the round-table engine. Pure TypeScript; models are reached through an injected `ModelRunner`, so it runs the same against Ditfa, a user's keys, local models, or test fakes.
-- **webview**: the chat panel and the settings panel. Plain DOM and CSS, under 80 KB, rendered from `contract` state.
+- **webview**: the chat panel and the settings panel. Plain DOM and CSS, under 100 KB, rendered from `contract` state.
 
 ## Sign-in
 

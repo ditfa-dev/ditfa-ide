@@ -269,11 +269,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case "requestModels":
-        this.post({ type: "models", catalog: await controller.modelCatalog() });
+        this.post({ type: "models", catalog: await controller.modelCatalog(typeof message.provider === "string" ? message.provider : undefined) });
         break;
 
       case "selectModel":
-        await controller.selectModel(message.model, message.effort);
+        await controller.selectModel(message.model, message.effort, typeof message.provider === "string" ? message.provider : undefined);
         break;
 
       case "selectProvider":
@@ -297,7 +297,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
 
       case "pasteSignInCode":
-        await controller.ditfa.pasteCode();
+        await controller.ditfa.pasteCode(typeof message.code === "string" ? message.code : undefined);
         break;
 
       case "cancelSignIn":
@@ -379,11 +379,48 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await this.voiceHandler?.(message);
         break;
 
+      case "pickFiles": {
+        const picked = await vscode.window.showOpenDialog({
+          canSelectMany: true,
+          canSelectFolders: true,
+          ...(vscode.workspace.workspaceFolders?.[0] ? { defaultUri: vscode.workspace.workspaceFolders[0].uri } : {}),
+          openLabel: "Attach",
+        });
+        for (const uri of picked ?? []) {
+          const stat = await vscode.workspace.fs.stat(uri).then(
+            (value) => value,
+            () => null,
+          );
+          this.attachToComposer({
+            kind: stat && stat.type & vscode.FileType.Directory ? "folder" : "file",
+            path: vscode.workspace.getWorkspaceFolder(uri) ? vscode.workspace.asRelativePath(uri, false) : uri.fsPath,
+            label: uri.path.split("/").pop() ?? uri.fsPath,
+          });
+        }
+        break;
+      }
+
+      case "attachActiveEditor":
+        await vscode.commands.executeCommand(
+          vscode.window.activeTextEditor?.selection.isEmpty === false ? "ditfa.addSelectionToChat" : "ditfa.addFileToChat",
+        );
+        break;
+
+      case "requestSetupOptions":
+        await controller.refreshSetup();
+        this.post({ type: "setupOptions", options: await controller.setupOptions() });
+        break;
+
       case "setupProvider":
-        if (message.id === "ditfa:key") {
-          await controller.useDitfaKey();
-        } else {
-          await controller.setupProvider(message.id);
+        {
+          const key = typeof message.key === "string" ? message.key : undefined;
+          if (message.id === "ditfa:key") {
+            await controller.useDitfaKey(key);
+          } else {
+            await controller.setupProvider(message.id, key);
+          }
+          // The model menu may be open on this provider's tab: show its models now that it can answer.
+          this.post({ type: "models", catalog: await controller.modelCatalog(message.id === "ditfa:key" ? "ditfa" : message.id) });
         }
         break;
 

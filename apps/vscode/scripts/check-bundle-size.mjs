@@ -12,8 +12,8 @@ const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "../dist");
 
 const BUDGETS = {
   "extension.js": 260_000,
-  "webview.js": 90_000,
-  "webview.css": 40_000,
+  "webview.js": 100_000,
+  "webview.css": 48_000,
   "settings.js": 70_000,
   "settings.css": 28_000,
 };

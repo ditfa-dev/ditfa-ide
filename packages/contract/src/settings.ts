@@ -140,6 +140,8 @@ export interface SettingsProvider {
   /** The last characters of the stored key, such as "…3f9a". Never the key itself. */
   keyHint?: string;
   baseUrl?: string;
+  /** Where to create a key for this provider; the panel links to it from the key form. */
+  keyUrl?: string;
   kind: "apiKey" | "local";
   status: ProviderStatus;
 }
@@ -291,8 +293,11 @@ export type SettingsAction =
   | { type: "useApiKey" }
   /** Without a provider the host lets the user pick a local server. */
   | { type: "useLocalModel"; providerId?: string }
-  /** The host asks for the key itself: keys never pass through the webview. */
-  | { type: "setProviderKey"; providerId: string }
+  /**
+   * The key typed into the panel's own form. It goes straight to the system keychain; the host never sends a
+   * key back, only its last characters (`keyHint`).
+   */
+  | { type: "setProviderKey"; providerId: string; key: string }
   | { type: "clearProviderKey"; providerId: string }
   /** `url` must be one of the snapshot's `links`, or `upgrade.url`. */
   | { type: "openLink"; url: string }

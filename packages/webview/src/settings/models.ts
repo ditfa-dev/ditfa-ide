@@ -262,16 +262,23 @@ function keyRow(ctx: ViewContext, provider: SettingsProvider, index: number): Ro
     ...(provider.status === "invalidKey" ? { error: `${provider.name} rejected this key. Replace it with a new one.` } : {}),
   };
   const tone = provider.status === "ready" ? "ok" : provider.status === "invalidKey" ? "danger" : "muted";
-  const replace = button(
-    provider.hasKey ? "Replace key" : "Add key",
-    data({ action: "setProviderKey", "provider-id": provider.id }),
-    {
-      icon: icons.key,
-      focus: `${id}-set`,
-      busy: ctx.busy.has(actionKey({ type: "setProviderKey", providerId: provider.id })),
-      label: `${provider.hasKey ? "Replace" : "Add"} the ${provider.name} key`,
-    },
-  );
+  const saving = ctx.busy.has(actionKey({ type: "setProviderKey", providerId: provider.id, key: "" }));
+  if (ctx.keyForm?.providerId === provider.id || saving) {
+    return {
+      id,
+      html: row(
+        { ...field, ...(ctx.keyForm?.error ? { error: ctx.keyForm.error } : {}) },
+        button("Cancel", data({ "key-cancel": provider.id }), { variant: "ghost", focus: `${id}-cancel` }),
+        { badge: dot(tone), className: "has-form", extra: keyForm(provider, id, saving) },
+      ),
+      search: `${provider.name} ${provider.id} api key byok`,
+    };
+  }
+  const replace = button(provider.hasKey ? "Replace key" : "Add key", data({ "key-open": provider.id }), {
+    icon: icons.key,
+    focus: `${id}-set`,
+    label: `${provider.hasKey ? "Replace" : "Add"} the ${provider.name} key`,
+  });
   const remove = provider.hasKey
     ? button("Remove", data({ action: "clearProviderKey", "provider-id": provider.id }), {
         variant: "ghost",
@@ -286,6 +293,30 @@ function keyRow(ctx: ViewContext, provider: SettingsProvider, index: number): Ro
     html: row(field, replace + remove, { badge: dot(tone) }),
     search: `${provider.name} ${provider.id} api key byok ${description}`,
   };
+}
+
+/** The key form under a provider: the key goes to the system keychain and is never shown again. */
+function keyForm(provider: SettingsProvider, id: string, saving: boolean): string {
+  const create = provider.keyUrl
+    ? ` ${button("Create a key", data({ action: "openLink", "key-url": provider.keyUrl }), {
+        variant: "link",
+        focus: `${id}-create`,
+        label: `Create a ${provider.name} API key`,
+      })}`
+    : "";
+  return (
+    `<div class="key-form">` +
+    `<input type="password" class="input mono" autocomplete="off" spellcheck="false" autocapitalize="off"` +
+    `${data({ "key-input": provider.id, focus: `${id}-key` })} placeholder="Paste your ${escapeHtml(provider.name)} API key"` +
+    ` aria-label="${escapeHtml(provider.name)} API key"${saving ? " disabled" : ""} />` +
+    button(saving ? "Saving" : "Save", data({ action: "setProviderKey", "provider-id": provider.id }), {
+      variant: "primary",
+      focus: `${id}-save`,
+      busy: saving,
+      label: `Save the ${provider.name} key`,
+    }) +
+    `</div><div class="row-desc key-note">Kept in your system keychain, never in settings files.${create}</div>`
+  );
 }
 
 function localRow(ctx: ViewContext, provider: SettingsProvider, index: number): Row {

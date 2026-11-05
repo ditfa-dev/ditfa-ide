@@ -8,6 +8,7 @@ import type {
   FileSuggestion,
   HostMessage,
   ModelCatalog,
+  ProviderTab,
   ModelChoice,
   PermissionLevel,
   RoundTableOption,
@@ -33,6 +34,7 @@ import { icons, sparkle } from "./icons";
 import { escapeHtml, renderMarkdown, token, whole } from "./markdown";
 import { markSvg } from "./mark";
 import { createVoiceIo } from "./voice";
+import { seatColor, seatInitials, tableDiagram, type Seat } from "./roundtableView";
 
 declare function acquireVsCodeApi(): {
   postMessage(message: WebviewMessage): void;
@@ -49,7 +51,17 @@ type Popover =
   | { kind: "files"; items: FileSuggestion[]; index: number }
   | { kind: "slash"; items: SlashCommand[]; index: number }
   | { kind: "modes"; index: number }
-  | { kind: "models"; catalog: ModelCatalog | null; index: number; filter: string }
+  | {
+      kind: "models";
+      catalog: ModelCatalog | null;
+      index: number;
+      filter: string;
+      /** The provider tab that is open; null until the first catalog says which one is active. */
+      provider: string | null;
+      /** The last tabs seen, so the strip stays put while another tab loads. */
+      tabs: ProviderTab[];
+    }
+  | { kind: "attach" }
   | {
       kind: "roundtable";
       options: RoundTableOption[] | null;
@@ -164,6 +176,15 @@ let planOpen = true;
 let turnStartedAt = 0;
 let workingTimer = 0;
 let lastGate = "";
+/** The setup row whose inline form is open: a provider's key, Ditfa's own key ("ditfa:key"), or a local server's help. */
+let setupForm: string | null = null;
+/** What is typed in the open key or code field. Written into the input after each render, never into markup. */
+let gateDraft = "";
+let gateError: string | null = null;
+/** The waiting screen's paste field is open. */
+let pasteOpen = false;
+/** A sign-in code: base64url of 32 bytes. */
+const SIGN_IN_CODE = /^[A-Za-z0-9_-]{43}$/;
 
 const root = document.getElementById("root") as HTMLDivElement;
 root.innerHTML = `
@@ -185,15 +206,14 @@ root.innerHTML = `
       <textarea id="composer" rows="1" dir="auto" placeholder="Ask Ditfa to build, explain, or fix something"></textarea>
       <div class="voice-bar" id="voice-bar" hidden></div>
       <div class="toolbar" id="toolbar">
-        <button class="tool" id="attach" type="button" title="Attach a file (@)">${icons.at}</button>
-        <button class="tool mode" id="mode-button" type="button"></button>
+        <button class="tool icon-only" id="attach" type="button" aria-label="Add files, commands and tools" aria-haspopup="menu">${icons.sliders}</button>
+        <button class="tool mode" id="mode-button" type="button" aria-haspopup="menu"></button>
         <span class="spacer"></span>
         <button class="ring" id="ring" type="button" hidden></button>
-        <button class="tool" id="roundtable-button" type="button" title="Round table: several models on one question">${icons.table}</button>
-        <button class="tool model" id="model-button" type="button"></button>
-        <button class="tool" id="dictate" type="button" aria-label="Dictate">${icons.mic}</button>
-        <button class="tool" id="talk" type="button" aria-label="Voice mode">${icons.wave}</button>
-        <button class="send" id="send" type="button" title="Send">${icons.send}</button>
+        <button class="tool model" id="model-button" type="button" aria-haspopup="menu"></button>
+        <button class="tool icon-only" id="dictate" type="button" aria-label="Dictate">${icons.mic}</button>
+        <button class="round talk" id="talk" type="button" aria-label="Voice mode">${icons.wave}</button>
+        <button class="round send" id="send" type="button" title="Send">${icons.send}</button>
       </div>
       <div class="composer-hint" id="composer-hint" hidden></div>
     </div>
@@ -299,8 +319,14 @@ function handleMessage(message: HostMessage): void {
       renderHistory();
       break;
     case "models":
-      if (popover?.kind === "models") {
+      // A catalog for another tab than the open one (a late answer) is dropped.
+      if (popover?.kind === "models" && (popover.provider === null || popover.provider === message.catalog.provider)) {
         popover.catalog = message.catalog;
+        popover.provider = message.catalog.provider;
+        popover.tabs = message.catalog.providers;
+        if (setupForm === null && message.catalog.provider) {
+          setupForm = message.catalog.provider;
+        }
         renderPopover();
       }
       break;
@@ -417,7 +443,7 @@ function firstUserText(): string | null {
 function renderGate(): void {
   const host = document.getElementById("gate") as HTMLElement;
   const { connection, connectionError, install, needsSetup, ditfa } = state.header;
-  const key = `${connection}|${connectionError ?? ""}|${needsSetup}|${install?.stage ?? ""}|${ditfa.signInStep}|${ditfa.signedIn}`;
+  const key = `${connection}|${connectionError ?? ""}|${needsSetup}|${install?.stage ?? ""}|${ditfa.signInStep}|${ditfa.signedIn}|${setupForm ?? ""}|${pasteOpen}|${gateError ?? ""}`;
 
   const show = connection !== "ready" || needsSetup;
   host.hidden = !show;
@@ -483,10 +509,17 @@ function renderGate(): void {
           <p>Sign in on the page that opened, with Google, a passkey or your password. Ditfa Code finishes on its own when you are done.</p>
           ${ditfa.signInStep === "waiting" ? `<div class="wait-actions">
             <button class="primary large" type="button" data-sign-in>Open the sign-in page again</button>
-            <button class="link" type="button" data-paste-code>The editor did not open? Paste the sign-in code</button>
+            ${pasteOpen ? inlineField({
+              field: "code",
+              placeholder: "Paste the code from the sign-in page",
+              label: "Sign-in code",
+              submit: "Continue",
+              note: "The code is on the sign-in page in your browser. It works once and expires in 2 minutes.",
+            }) : `<button class="link" type="button" data-paste-code>The editor did not open? Paste the sign-in code</button>`}
             <button class="link" type="button" data-cancel-sign-in>Cancel</button>
           </div>` : `<p class="gate-note">${sparkle("Signing in", 16)}</p>`}
         </div>`;
+        restoreGateDraft(host);
         break;
       }
       host.innerHTML = `${lines}<div class="gate-body setup">${markSvg("assemble", "gate-mark")}
@@ -494,28 +527,147 @@ function renderGate(): void {
         <p>Sign in to use your Ditfa plan: every Ditfa model, Ditfa's tools in your projects, and voice. Or bring your own key or a local model.</p>
         ${renderSetupOptions()}
       </div>`;
+      restoreGateDraft(host);
       break;
   }
+}
+
+/** A key or code field inside the setup screen, with its submit button and a note under it. */
+function inlineField(options: { field: "key" | "code"; placeholder: string; label: string; submit: string; note: string; link?: string }): string {
+  return `<div class="gate-form" data-gate-form="${options.field}">
+    <div class="gate-form-row">
+      <input class="gate-input" type="${options.field === "key" ? "password" : "text"}" data-gate-input="${options.field}"
+        autocomplete="off" spellcheck="false" autocapitalize="off" placeholder="${escapeHtml(options.placeholder)}" aria-label="${escapeHtml(options.label)}" />
+      <button class="primary" type="button" data-gate-submit="${options.field}">${escapeHtml(options.submit)}</button>
+    </div>
+    ${gateError ? `<p class="gate-form-error" role="alert">${escapeHtml(gateError)}</p>` : ""}
+    <p class="gate-form-note">${escapeHtml(options.note)}${options.link ? ` <a href="${escapeHtml(options.link)}">Create a key</a>` : ""}</p>
+  </div>`;
+}
+
+/** Re-rendering the gate replaces the input: put back what was typed, and the caret. */
+function restoreGateDraft(host: HTMLElement): void {
+  const input = host.querySelector<HTMLInputElement>("[data-gate-input]");
+  if (input) {
+    input.value = gateDraft;
+    input.focus();
+  }
+}
+
+/** Where to create a key for each provider the setup screen lists. */
+const KEY_PAGES: Record<string, string> = {
+  "ditfa:key": "https://chat.ditfa.com/api-keys",
+  openai: "https://platform.openai.com/api-keys",
+  anthropic: "https://console.anthropic.com/settings/keys",
+  gemini: "https://aistudio.google.com/apikey",
+  openrouter: "https://openrouter.ai/keys",
+  deepseek: "https://platform.deepseek.com/api_keys",
+};
+
+/** How to start each local model server, for the inline help under it. */
+const LOCAL_HELP: Record<string, { start: string; download: string }> = {
+  ollama: { start: "ollama serve", download: "https://ollama.com/download" },
+  lmstudio: { start: "lms server start", download: "https://lmstudio.ai" },
+};
+
+function openSetupForm(id: string | null): void {
+  setupForm = id;
+  gateDraft = "";
+  gateError = null;
+  lastGate = "";
+  renderGate();
+  if (popover?.kind === "models") {
+    renderPopover();
+  }
+}
+
+/** The gate and the model menu share the key and code forms; after a change, both show it. */
+function rerenderForms(): void {
+  lastGate = "";
+  renderGate();
+  if (popover?.kind === "models") {
+    renderPopover();
+  }
+}
+
+function submitGateField(field: string): void {
+  const value = gateDraft.trim();
+  if (field === "code") {
+    if (!SIGN_IN_CODE.test(value)) {
+      gateError = value ? "That does not look like a sign-in code." : "Paste the code first.";
+      rerenderForms();
+      return;
+    }
+    vscode.postMessage({ type: "pasteSignInCode", code: value });
+  } else {
+    if (!setupForm || value.length < 8 || /\s/.test(value)) {
+      gateError = value ? "That does not look like an API key." : "Paste the key first.";
+      rerenderForms();
+      return;
+    }
+    vscode.postMessage({ type: "setupProvider", id: setupForm, key: value });
+    if (popover?.kind === "models") {
+      // The host answers with this provider's models once the key is saved.
+      popover.catalog = null;
+    }
+  }
+  gateDraft = "";
+  gateError = null;
+  pasteOpen = false;
+  setupForm = popover?.kind === "models" ? popover.provider : null;
+  rerenderForms();
 }
 
 function renderSetupOptions(): string {
   if (setupOptions.length === 0) {
     return `<p class="gate-note">Looking for what is available…</p>`;
   }
-  const row = (option: SetupOption) => `
-    <button class="setup-row" type="button" data-setup="${escapeHtml(option.id)}">
-      <span class="setup-icon">${option.kind === "local" ? icons.cpu : icons.key}</span>
-      <span class="setup-text"><span>${escapeHtml(option.label)}</span><small>${escapeHtml(option.detail)}</small></span>
-      ${option.ready ? '<span class="status-dot"></span>' : ""}
-    </button>`;
+  const open = (id: string) => setupForm === id;
+  const row = (option: SetupOption) => {
+    // A local server that is not running opens its help instead of switching to a dead port.
+    const action = option.kind === "local" && option.ready ? `data-setup="${escapeHtml(option.id)}"` : `data-setup-form="${escapeHtml(option.id)}"`;
+    const form =
+      open(option.id) && option.kind === "apiKey"
+        ? inlineField({
+            field: "key",
+            placeholder: `Paste your ${option.label} API key`,
+            label: `${option.label} API key`,
+            submit: "Save",
+            note: "Kept in your system keychain, never in settings files.",
+            ...(KEY_PAGES[option.id] ? { link: KEY_PAGES[option.id] } : {}),
+          })
+        : open(option.id) && option.kind === "local"
+          ? localHelp(option)
+          : "";
+    return `<div class="setup-item${open(option.id) ? " open" : ""}">
+      <button class="setup-row" type="button" ${action} aria-expanded="${open(option.id)}">
+        <span class="setup-icon">${option.kind === "local" ? icons.cpu : icons.key}</span>
+        <span class="setup-text"><span>${escapeHtml(option.label)}</span><small>${escapeHtml(option.detail)}</small></span>
+        ${option.ready ? '<span class="status-dot"></span>' : `<span class="setup-chevron">${icons.chevron}</span>`}
+      </button>${form}</div>`;
+  };
   const account = setupOptions.find((option) => option.kind === "account");
   const keys = setupOptions.filter((option) => option.kind === "apiKey");
   const local = setupOptions.filter((option) => option.kind === "local");
   return `
-    ${account ? `<button class="primary large" type="button" data-setup="${escapeHtml(account.id)}">${icons.sparkles}<span>${escapeHtml(account.label)}</span></button><p class="gate-note">${escapeHtml(account.detail)} <button class="link" type="button" data-setup="ditfa:key">I have a Ditfa API key</button></p>` : ""}
+    ${account ? `<button class="primary large" type="button" data-setup="${escapeHtml(account.id)}">${icons.sparkles}<span>${escapeHtml(account.label)}</span></button>
+      <p class="gate-note">${escapeHtml(account.detail)} <button class="link" type="button" data-setup-form="ditfa:key">I have a Ditfa API key</button></p>
+      ${open("ditfa:key") ? inlineField({ field: "key", placeholder: "Paste your Ditfa API key (dt-…)", label: "Ditfa API key", submit: "Save", note: "Kept in your system keychain.", link: KEY_PAGES["ditfa:key"] }) : ""}` : ""}
     <h2>Your own API key</h2><div class="setup-list">${keys.map(row).join("")}</div>
     <h2>On this machine</h2><div class="setup-list">${local.map(row).join("")}</div>
   `;
+}
+
+function localHelp(option: SetupOption): string {
+  const help = LOCAL_HELP[option.id];
+  return `<div class="gate-form">
+    <p class="gate-form-note">${escapeHtml(option.label)} is not running on this machine.${help ? ` Start it in a terminal, then check again:` : ""}</p>
+    ${help ? `<code class="gate-command">${escapeHtml(help.start)}</code>` : ""}
+    <div class="gate-form-row">
+      <button class="primary" type="button" data-setup-refresh>Check again</button>
+      ${help ? `<a class="link" href="${escapeHtml(help.download)}">Download ${escapeHtml(option.label)}</a>` : ""}
+    </div>
+  </div>`;
 }
 
 function installLabel(): string {
@@ -819,6 +971,8 @@ function renderAttachments(): void {
   }
   host.innerHTML = chips.join("");
   host.hidden = chips.length === 0;
+  // An attachment makes the round button send instead of starting voice mode.
+  renderToolbar();
 }
 
 function renderToolbar(): void {
@@ -830,6 +984,9 @@ function renderToolbar(): void {
   send.title = stop ? "Stop" : state.turnActive ? "Queue: send when this turn ends" : "Send";
   send.classList.toggle("stop", stop);
   send.disabled = header.connection !== "ready";
+  // Like Ditfa on the web: an empty composer offers voice mode in the send button's place.
+  const box = document.getElementById("composer-box") as HTMLElement;
+  box.classList.toggle("talk-ready", !typed && attachments.length === 0 && !state.turnActive && header.voice.conversation && !voice.active);
 
   const hint = document.getElementById("composer-hint") as HTMLElement;
   hint.hidden = !(state.turnActive && typed);
@@ -854,12 +1011,12 @@ function renderToolbar(): void {
   dictate.hidden = voice.active;
   talk.hidden = voice.active;
   (document.getElementById("attach") as HTMLButtonElement).title =
-    caps && !caps.vision ? "Attach a file (@). This model does not read images." : "Attach a file (@), or paste an image";
+    caps && !caps.vision ? "Files, commands and tools. This model does not read images." : "Files, commands and tools";
 
   const model = document.getElementById("model-button") as HTMLButtonElement;
   const name = header.model ?? header.providerLabel ?? "Model";
   const reasoning = caps?.reasoning && header.reasoningEffort ? ` · ${escapeHtml(header.reasoningEffort)}` : "";
-  model.innerHTML = `<span>${escapeHtml(name)}${reasoning}</span>${caps ? capabilityChips(caps, true) : ""}${icons.chevron}`;
+  model.innerHTML = `<span class="model-name">${escapeHtml(name)}${reasoning}</span>${icons.updown}`;
   model.title = `${header.providerLabel ?? "Default provider"}: change model`;
 
   const ring = document.getElementById("ring") as HTMLButtonElement;
@@ -932,11 +1089,32 @@ function filteredModels(pop: Extract<Popover, { kind: "models" }>) {
 }
 
 function modelRows(pop: Extract<Popover, { kind: "models" }>): string {
+  const catalog = pop.catalog;
+  const tabs = catalog?.providers ?? pop.tabs;
+  const viewing = pop.provider ?? catalog?.provider ?? null;
+  const tab = tabs.find((candidate) => candidate.id === viewing) ?? null;
+  const strip = tabs.length
+    ? `<div class="provider-tabs" role="tablist" aria-label="Providers">${tabs
+        .map(
+          (candidate) => `<button class="provider-tab${candidate.id === viewing ? " on" : ""}" type="button" role="tab"
+            aria-selected="${candidate.id === viewing}" data-provider-tab="${escapeHtml(candidate.id)}">
+            <span class="tab-dot${candidate.ready ? " ready" : ""}" aria-hidden="true"></span>${escapeHtml(candidate.label)}
+          </button>`,
+        )
+        .join("")}</div>`
+    : "";
+
+  // A provider that cannot answer yet shows how to set it up, right here.
+  if (catalog && tab && !tab.ready) {
+    return `${strip}<div class="pop-scroll provider-setup">${providerSetup(tab)}</div>${modelMenuFooter()}`;
+  }
+
   const models = filteredModels(pop);
+  const usingOther = catalog !== null && catalog.provider !== catalog.activeProvider;
   const rows = models
-    .slice(0, 60)
+    .slice(0, 80)
     .map((model, position) => {
-      const current = model.id === state.header.model;
+      const current = !usingOther && model.id === state.header.model;
       const efforts =
         current && model.efforts.length > 1
           ? `<span class="effort-row">${model.efforts
@@ -948,16 +1126,17 @@ function modelRows(pop: Extract<Popover, { kind: "models" }>): string {
           : "";
       if (model.locked) {
         return `
-        <div class="pop-row locked${position === pop.index ? " selected" : ""}">
-          <span class="pop-icon">${icons.lock}</span>
+        <div class="pop-row model-row locked${position === pop.index ? " selected" : ""}">
+          <span class="model-avatar">${icons.lock}</span>
           <span class="pop-text"><span>${escapeHtml(model.label)}</span><small>${model.requiredPlan ? `Comes with ${escapeHtml(model.requiredPlan.charAt(0).toUpperCase() + model.requiredPlan.slice(1))}` : "Not on your plan"}</small></span>
           <button class="upgrade-pill" type="button" data-open-upgrade>Upgrade</button>
         </div>`;
       }
       return `
-        <button class="pop-row${position === pop.index ? " selected" : ""}" type="button" data-model="${escapeHtml(model.id)}">
-          <span class="pop-text"><span>${escapeHtml(model.label)}${model.capabilities ? capabilityChips(model.capabilities) : ""}</span>${model.description ? `<small>${escapeHtml(model.description)}</small>` : ""}${efforts}</span>
-          ${current ? icons.check : ""}
+        <button class="pop-row model-row${position === pop.index ? " selected" : ""}${current ? " current" : ""}" type="button" data-model="${escapeHtml(model.id)}">
+          <span class="model-avatar">${escapeHtml(modelInitials(model.label))}</span>
+          <span class="pop-text"><span class="model-title">${escapeHtml(model.label)}${model.capabilities ? capabilityChips(model.capabilities) : ""}</span>${model.description ? `<small>${escapeHtml(model.description)}</small>` : model.label !== model.id ? `<small class="mono">${escapeHtml(model.id)}</small>` : ""}${efforts}</span>
+          ${current ? `<span class="pop-check">${icons.check}</span>` : ""}
         </button>`;
     })
     .join("");
@@ -965,19 +1144,88 @@ function modelRows(pop: Extract<Popover, { kind: "models" }>): string {
   const typed = pop.filter.trim();
   const custom =
     typed && !models.some((model) => model.id === typed)
-      ? `<button class="pop-row" type="button" data-model="${escapeHtml(typed)}"><span class="pop-text"><span>Use “${escapeHtml(typed)}”</span></span></button>`
+      ? `<button class="pop-row model-row" type="button" data-model="${escapeHtml(typed)}"><span class="model-avatar">${icons.plus}</span><span class="pop-text"><span>Use “${escapeHtml(typed)}”</span><small>A model id this provider does not list</small></span></button>`
       : "";
-  const body = !pop.catalog
-    ? `<div class="pop-note">Loading models…</div>`
-    : pop.catalog.error
-      ? `<div class="pop-note">${escapeHtml(pop.catalog.error)} Type a model id above, or change the provider.</div>`
+  const switchNote = usingOther
+    ? `<div class="pop-note">Choosing a ${escapeHtml(catalog?.providerLabel ?? "")} model starts a new conversation with it.</div>`
+    : "";
+  const body = !catalog
+    ? `<div class="pop-loading">${sparkle("Loading models", 14)}<span>Loading models…</span></div>`
+    : catalog.error
+      ? `<div class="pop-note">${escapeHtml(catalog.error)} Type a model id above.</div>`
       : rows || (custom ? "" : `<div class="pop-note">No models found.</div>`);
-  return `
-    <input class="pop-search" id="model-filter" type="text" placeholder="Search or type a model id" value="${escapeHtml(pop.filter)}" />
+  return `${strip}
+    <div class="pop-search-row">${icons.search}<input class="pop-search" id="model-filter" type="text" placeholder="Search models or type an id" value="${escapeHtml(pop.filter)}" /></div>
+    ${switchNote}
     <div class="pop-scroll">${body}${custom}</div>
-    <button class="pop-row footer-row" type="button" data-change-provider>
-      <span class="pop-text"><span>${escapeHtml(pop.catalog?.providerLabel ?? "Provider")}</span><small>Change provider</small></span>
+    ${modelMenuFooter()}`;
+}
+
+/** Two letters for a model's badge: "Claude Sonnet" -> "CS", "gpt-5" -> "G5". */
+function modelInitials(label: string): string {
+  const words = label.replace(/[^A-Za-z0-9 .-]/g, " ").split(/[\s.-]+/).filter(Boolean);
+  const letters = words.slice(0, 2).map((word) => word[0] ?? "");
+  return (letters.join("") || "?").toUpperCase();
+}
+
+function modelMenuFooter(): string {
+  return `<button class="pop-row footer-row" type="button" data-open-profile>
+      <span class="pop-icon">${icons.gear}</span>
+      <span class="pop-text"><span>Keys, models and providers</span></span>
     </button>`;
+}
+
+/** Sign-in, a key form, or a local server's help, inside the model menu. */
+function providerSetup(tab: ProviderTab): string {
+  if (tab.kind === "account") {
+    return `<div class="provider-setup-body">
+      <p class="setup-title">${escapeHtml(tab.label)}</p>
+      <p class="gate-form-note">Sign in to use every Ditfa model on your plan, Ditfa's tools and voice.</p>
+      <button class="primary large" type="button" data-sign-in>${icons.sparkles}<span>Sign in with Ditfa</span></button>
+      ${setupForm === "ditfa:key"
+        ? inlineField({ field: "key", placeholder: "Paste your Ditfa API key (dt-…)", label: "Ditfa API key", submit: "Save", note: "Kept in your system keychain.", link: KEY_PAGES["ditfa:key"] })
+        : `<button class="link" type="button" data-setup-form="ditfa:key">I have a Ditfa API key</button>`}
+    </div>`;
+  }
+  if (tab.kind === "local") {
+    return `<div class="provider-setup-body">${localHelp({ id: tab.id, label: tab.label, detail: "", kind: "local", ready: false })}</div>`;
+  }
+  if (tab.kind === "custom") {
+    return `<div class="provider-setup-body"><p class="gate-form-note">${escapeHtml(tab.label)} is set up in your Ditfa config but does not answer.</p></div>`;
+  }
+  return `<div class="provider-setup-body">
+    <p class="setup-title">${escapeHtml(tab.label)}</p>
+    ${inlineField({
+      field: "key",
+      placeholder: `Paste your ${tab.label} API key`,
+      label: `${tab.label} API key`,
+      submit: "Save",
+      note: "Kept in your system keychain, never in settings files.",
+      ...(tab.keyUrl ? { link: tab.keyUrl } : KEY_PAGES[tab.id] ? { link: KEY_PAGES[tab.id] } : {}),
+    })}
+  </div>`;
+}
+
+/** Everything the sliders button offers, like the composer on Ditfa's web app. */
+function attachMenu(): string {
+  const caps = state.header.modelCapabilities;
+  const item = (id: string, icon: string, label: string, detail?: string) =>
+    `<button class="pop-row attach-row" type="button" role="menuitem" data-attach-item="${id}">
+      <span class="pop-icon">${icon}</span><span class="pop-text"><span>${escapeHtml(label)}</span>${detail ? `<small>${escapeHtml(detail)}</small>` : ""}</span>
+    </button>`;
+  return `<div class="attach-grid" role="menu">
+      <button class="attach-tile" type="button" role="menuitem" data-attach-item="files">${icons.clip}<span>Files</span></button>
+      <button class="attach-tile" type="button" role="menuitem" data-attach-item="commands">${icons.slash}<span>Commands</span></button>
+      <button class="attach-tile" type="button" role="menuitem" data-attach-item="reference">${icons.at}<span>Reference</span></button>
+    </div>
+    <div class="pop-divider"></div>
+    ${item("selection", icons.selection, "Add the open file or selection")}
+    ${caps && !caps.vision ? "" : item("image", icons.eyeSmall, "Add an image", "Paste or drop one into the box")}
+    <div class="pop-divider"></div>
+    ${item("roundtable", icons.table, "Round table", "Several models on one question")}
+    ${item("skills", icons.sparkles, "Skills and commands", "Type / to run one")}
+    <div class="pop-divider"></div>
+    ${item("settings", icons.gear, "Settings")}`;
 }
 
 function renderPopover(): void {
@@ -994,8 +1242,15 @@ function renderPopover(): void {
     case "models": {
       const hadFocus = document.activeElement?.id === "model-filter";
       host.innerHTML = modelRows(popover);
-      const input = document.getElementById("model-filter") as HTMLInputElement;
-      if (hadFocus || !popover.catalog) {
+      const keyInput = host.querySelector<HTMLInputElement>("[data-gate-input]");
+      if (keyInput) {
+        // A provider's key form: the draft is written in after rendering, never into markup.
+        keyInput.value = gateDraft;
+        keyInput.focus();
+        break;
+      }
+      const input = document.getElementById("model-filter") as HTMLInputElement | null;
+      if (input && (hadFocus || !popover.catalog)) {
         input.focus();
         input.setSelectionRange(input.value.length, input.value.length);
       }
@@ -1003,6 +1258,9 @@ function renderPopover(): void {
     }
     case "roundtable":
       host.innerHTML = roundTableSheet(popover);
+      break;
+    case "attach":
+      host.innerHTML = attachMenu();
       break;
     case "files":
       host.innerHTML = popover.items
@@ -1116,6 +1374,17 @@ function wireEvents(): void {
 
 function onRootKey(event: KeyboardEvent): void {
   const target = event.target as HTMLElement;
+  if (target.matches("[data-gate-input]")) {
+    if (event.key === "Enter" && !event.isComposing) {
+      event.preventDefault();
+      submitGateField((target as HTMLInputElement).dataset.gateInput ?? "key");
+    } else if (event.key === "Escape") {
+      event.preventDefault();
+      pasteOpen = false;
+      openSetupForm(null);
+    }
+    return;
+  }
   if (target.matches("[data-edit-input]")) {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -1159,6 +1428,11 @@ function onRootKey(event: KeyboardEvent): void {
 
 function onInput(event: Event): void {
   const target = event.target as HTMLInputElement;
+  if (target.matches("[data-gate-input]")) {
+    // Typing only updates the draft; the gate keeps its markup until something else changes.
+    gateDraft = target.value;
+    return;
+  }
   const card = target.closest<HTMLElement>("[data-approval-kind]");
   if (card && target.matches("input[data-hunk-pick]")) {
     syncApprovalButtons(card);
@@ -1306,8 +1580,20 @@ function onClick(event: MouseEvent): void {
   if (hit("#send")) {
     submit();
   } else if (hit("#attach")) {
-    insertText("@", true);
-    updateSuggestions();
+    popover = popover?.kind === "attach" ? null : { kind: "attach" };
+    renderPopover();
+  } else if (hit("[data-attach-item]")) {
+    onAttachItem(hit("[data-attach-item]")?.dataset.attachItem ?? "");
+  } else if (hit("[data-provider-tab]")) {
+    const id = hit("[data-provider-tab]")?.dataset.providerTab ?? null;
+    if (popover?.kind === "models" && id) {
+      popover = { ...popover, provider: id, catalog: null, index: 0, filter: "", tabs: popover.catalog?.providers ?? popover.tabs };
+      setupForm = id;
+      gateDraft = "";
+      gateError = null;
+      renderPopover();
+      vscode.postMessage({ type: "requestModels", provider: id });
+    }
   } else if (hit("#mode-button")) {
     popover =
       popover?.kind === "modes"
@@ -1315,13 +1601,7 @@ function onClick(event: MouseEvent): void {
         : { kind: "modes", index: CHAT_MODES.findIndex((mode) => mode.id === state.header.chatMode) };
     renderPopover();
   } else if (hit("#roundtable-button")) {
-    if (popover?.kind === "roundtable") {
-      closePopover();
-    } else {
-      popover = { kind: "roundtable", options: null, selected: [], mode: "review", error: null, note: null };
-      renderPopover();
-      vscode.postMessage({ type: "requestRoundTableOptions" });
-    }
+    openRoundTable();
   } else if (hit("#dictate")) {
     startVoice("dictation");
   } else if (hit("#talk")) {
@@ -1330,7 +1610,7 @@ function onClick(event: MouseEvent): void {
     if (popover?.kind === "models") {
       closePopover();
     } else {
-      popover = { kind: "models", catalog: null, index: 0, filter: "" };
+      popover = { kind: "models", catalog: null, index: 0, filter: "", provider: null, tabs: [] };
       renderPopover();
       vscode.postMessage({ type: "requestModels" });
     }
@@ -1367,8 +1647,10 @@ function onClick(event: MouseEvent): void {
     includeActiveFile = !includeActiveFile;
     renderAttachments();
   } else if (hit("[data-change-provider]")) {
-    closePopover();
-    vscode.postMessage({ type: "selectProvider" });
+    // The model menu is where providers are switched and set up, all inline.
+    popover = { kind: "models", catalog: null, index: 0, filter: "", provider: null, tabs: [] };
+    renderPopover();
+    vscode.postMessage({ type: "requestModels" });
   } else {
     onDataClick(target, hit);
   }
@@ -1419,6 +1701,20 @@ function onDataClick(target: HTMLElement, hit: (selector: string) => HTMLElement
       entryId: undoFile.dataset.reviewEntry ?? "",
       path: undoFile.dataset.reviewPath ?? "",
     });
+  } else if (hit("[data-setup-form]")) {
+    const id = hit("[data-setup-form]")?.dataset.setupForm ?? null;
+    openSetupForm(setupForm === id ? null : id);
+  } else if (hit("[data-gate-submit]")) {
+    submitGateField(hit("[data-gate-submit]")?.dataset.gateSubmit ?? "key");
+  } else if (hit("[data-setup-refresh]")) {
+    if (popover?.kind === "models" && popover.provider) {
+      popover.catalog = null;
+      renderPopover();
+      vscode.postMessage({ type: "requestModels", provider: popover.provider });
+    } else {
+      setupForm = null;
+    }
+    vscode.postMessage({ type: "requestSetupOptions" });
   } else if (setup) {
     if (setup === "ditfa") {
       vscode.postMessage({ type: "signIn" });
@@ -1536,7 +1832,8 @@ function startRename(threadId: string): void {
 function chooseModel(model: string, effort: string | null): void {
   const catalog = popover?.kind === "models" ? popover.catalog : null;
   const choice = catalog?.models.find((item) => item.id === model);
-  vscode.postMessage({ type: "selectModel", model, effort });
+  const provider = catalog && catalog.provider && catalog.provider !== catalog.activeProvider ? catalog.provider : undefined;
+  vscode.postMessage({ type: "selectModel", model, effort, ...(provider ? { provider } : {}) });
   // Stay open when a model offers effort levels, so the choice is one click away.
   if (effort === null && choice && choice.efforts.length > 1 && popover?.kind === "models") {
     state.header.model = model;
@@ -1837,6 +2134,46 @@ function startVoice(mode: "dictation" | "conversation"): void {
   vscode.postMessage({ type: "voiceStart", mode });
 }
 
+function openRoundTable(): void {
+  if (popover?.kind === "roundtable") {
+    closePopover();
+    return;
+  }
+  popover = { kind: "roundtable", options: null, selected: [], mode: "review", error: null, note: null };
+  renderPopover();
+  vscode.postMessage({ type: "requestRoundTableOptions" });
+}
+
+function onAttachItem(item: string): void {
+  closePopover();
+  switch (item) {
+    case "files":
+      vscode.postMessage({ type: "pickFiles" });
+      return;
+    case "commands":
+    case "skills":
+      insertText("/", true);
+      updateSuggestions();
+      return;
+    case "reference":
+      insertText("@", true);
+      updateSuggestions();
+      return;
+    case "selection":
+      vscode.postMessage({ type: "attachActiveEditor" });
+      return;
+    case "image":
+      composer.focus();
+      return;
+    case "roundtable":
+      openRoundTable();
+      return;
+    case "settings":
+      vscode.postMessage({ type: "openProfile" });
+      return;
+  }
+}
+
 /** Clicks on the account chip, the banner, the sign-in card, the queue and message actions. */
 function onAccountOrQueueClick(hit: (selector: string) => HTMLElement | null): boolean {
   if (onRoundTableClick(hit)) {
@@ -1845,7 +2182,11 @@ function onAccountOrQueueClick(hit: (selector: string) => HTMLElement | null): b
   if (hit("[data-sign-in]")) {
     vscode.postMessage({ type: "signIn" });
   } else if (hit("[data-paste-code]")) {
-    vscode.postMessage({ type: "pasteSignInCode" });
+    pasteOpen = true;
+    gateDraft = "";
+    gateError = null;
+    lastGate = "";
+    renderGate();
   } else if (hit("[data-cancel-sign-in]")) {
     vscode.postMessage({ type: "cancelSignIn" });
   } else if (hit("[data-open-profile]")) {
@@ -1926,45 +2267,84 @@ function flashCopied(button: HTMLElement): void {
 /** Seat the models (the suggested three are ticked), pick review or team, and start on what is in the composer. */
 function roundTableSheet(pop: Extract<Popover, { kind: "roundtable" }>): string {
   const modes = `
-    <div class="rt-modes" role="radiogroup">
+    <div class="rt-modes" role="radiogroup" aria-label="How the table works">
       <button type="button" class="rt-mode${pop.mode === "review" ? " on" : ""}" data-rt-mode="review" role="radio" aria-checked="${pop.mode === "review"}">
-        <span>Anonymous review</span><small>Each model answers blind, critiques the others by letter, then ranks them. The leader writes the verdict.</small>
+        <span>${icons.eyeSmall} Anonymous review</span><small>Every model answers blind, critiques the others by letter and ranks them. The leader writes the verdict.</small>
       </button>
       <button type="button" class="rt-mode${pop.mode === "team" ? " on" : ""}" data-rt-mode="team" role="radio" aria-checked="${pop.mode === "team"}">
-        <span>Team</span><small>The leader splits the goal, each part goes to the model best at it, and the work is reviewed and merged.</small>
+        <span>${icons.agent} Team</span><small>The leader splits the task, each part goes to the model best at it, and the work is reviewed and merged.</small>
       </button>
     </div>`;
+  const head = `<div class="rt-sheet-head"><span class="rt-sheet-title">${icons.table}<span>Round table</span></span>
+    <button class="tool icon-only" type="button" data-rt-close aria-label="Close">${icons.close}</button></div>`;
+
   if (!pop.options) {
-    return `<div class="rt-sheet">${modes}<div class="pop-note">${sparkle("Loading", 13)} Finding models…</div></div>`;
+    return `<div class="rt-sheet">${head}${tableDiagram([], { title: "Round table", subtitle: "Finding models…", minSeats: 4 })}<div class="pop-loading">${sparkle("Loading", 14)}<span>Finding the models you can seat…</span></div></div>`;
   }
   if (pop.options.length === 0) {
-    return `<div class="rt-sheet">${modes}<div class="pop-note">${escapeHtml(pop.error ?? "No models are available.")}</div>
-      <button class="pop-row footer-row" type="button" data-sign-in><span class="pop-text"><span>Sign in to Ditfa</span><small>Seat every Ditfa model on your plan</small></span></button></div>`;
+    return `<div class="rt-sheet">${head}${tableDiagram([], { title: "No models yet", minSeats: 4 })}
+      <div class="rt-empty">
+        <p>${escapeHtml(pop.error ?? "Sign in to Ditfa or add an API key to seat models at the table.")}</p>
+        <button class="primary large" type="button" data-sign-in>${icons.sparkles}<span>Sign in with Ditfa</span></button>
+        <button class="link" type="button" data-change-provider>Add an API key or a local model</button>
+      </div></div>`;
   }
-  const leader = pop.options.filter((option) => pop.selected.includes(option.ref)).sort((a, b) => b.score - a.score)[0];
-  const rows = pop.options
-    .slice(0, 40)
-    .map((option) => {
-      const on = pop.selected.includes(option.ref);
-      return `
-      <label class="rt-option${on ? " on" : ""}">
-        <input type="checkbox" data-rt-pick="${escapeHtml(option.ref)}" ${on ? "checked" : ""} />
-        <span class="pop-text"><span>${escapeHtml(option.label)}${leader?.ref === option.ref ? ' <span class="rt-leader">Leader</span>' : ""}</span>
-          <small>${escapeHtml(option.providerLabel)}${option.strengths.length ? ` · ${escapeHtml(option.strengths.join(", "))}` : ""}</small></span>
-        <span class="rt-score" title="Estimated overall strength">${whole(option.score)}</span>
-      </label>`;
-    })
+
+  const seated = pop.selected
+    .map((ref) => pop.options?.find((option) => option.ref === ref))
+    .filter((option): option is RoundTableOption => Boolean(option));
+  const leader = [...seated].sort((a, b) => b.score - a.score)[0];
+  const seats: Seat[] = seated.map((option) => ({
+    key: option.ref,
+    name: option.label,
+    detail: option.providerLabel,
+    leader: option.ref === leader?.ref,
+    attrs: ` data-rt-unseat="${escapeHtml(option.ref)}"`,
+    label: `Remove ${option.label} from the table`,
+  }));
+  const diagram = tableDiagram(seats, {
+    title: pop.mode === "review" ? "Review" : "Team",
+    subtitle: seated.length ? `${seated.length} at the table` : "Pick the models",
+    minSeats: 4,
+  });
+
+  const groups = new Map<string, RoundTableOption[]>();
+  for (const option of pop.options.slice(0, 60)) {
+    groups.set(option.providerLabel, [...(groups.get(option.providerLabel) ?? []), option]);
+  }
+  const list = [...groups.entries()]
+    .map(
+      ([provider, options]) => `<div class="rt-group"><div class="pop-heading">${escapeHtml(provider)}</div>${options
+        .map((option) => {
+          const on = pop.selected.includes(option.ref);
+          return `
+          <label class="rt-option${on ? " on" : ""}" style="--seat:${seatColor(option.ref)}">
+            <input type="checkbox" data-rt-pick="${escapeHtml(option.ref)}" ${on ? "checked" : ""} />
+            <span class="rt-option-avatar">${escapeHtml(seatInitials(option.label))}</span>
+            <span class="pop-text"><span>${escapeHtml(option.label)}${leader?.ref === option.ref ? ' <span class="rt-leader">Leader</span>' : ""}</span>
+              <small>${option.strengths.length ? escapeHtml(option.strengths.join(" · ")) : escapeHtml(option.providerLabel)}</small></span>
+            <span class="rt-score" title="Estimated overall strength">${whole(option.score)}</span>
+          </label>`;
+        })
+        .join("")}</div>`,
+    )
     .join("");
+
   const count = pop.selected.length;
   const enough = pop.mode === "review" ? count >= 2 : count >= 1;
+  const need = pop.mode === "review" && count < 2 ? `Seat ${whole(2 - count)} more model${2 - count === 1 ? "" : "s"} for a review.` : "";
   return `
     <div class="rt-sheet">
+      ${head}
+      ${diagram}
       ${modes}
-      <div class="pop-scroll rt-options">${rows}</div>
+      <div class="pop-scroll rt-options">${list}
+        <button class="link rt-more" type="button" data-change-provider>${icons.plus} Add models from another provider</button>
+      </div>
       ${pop.note ? `<div class="pop-note">${escapeHtml(pop.note)}</div>` : ""}
       <div class="rt-start-row">
-        <span class="rt-hint">The question or task is what you typed in the box.</span>
-        <button class="primary small" type="button" data-rt-start ${enough ? "" : "disabled"}>${icons.table}<span>Start with ${whole(count)} model${count === 1 ? "" : "s"}</span></button>
+        <span class="rt-hint">${escapeHtml(need || "The question is what you typed in the box.")}</span>
+        <button class="primary small" type="button" data-rt-start ${enough ? "" : "disabled"}>${icons.play}<span>Start</span></button>
       </div>
     </div>`;
 }
@@ -1975,6 +2355,16 @@ function onRoundTableClick(hit: (selector: string) => HTMLElement | null): boole
   const mode = hit("[data-rt-mode]")?.dataset.rtMode as "review" | "team" | undefined;
   const stop = hit("[data-rt-stop]")?.dataset.rtStop;
   const action = hit("[data-rt-action]");
+  const unseat = hit("[data-rt-unseat]")?.dataset.rtUnseat;
+  if (pop && unseat) {
+    pop.selected = pop.selected.filter((item) => item !== unseat);
+    renderPopover();
+    return true;
+  }
+  if (pop && hit("[data-rt-close]")) {
+    closePopover();
+    return true;
+  }
   if (pop && pick) {
     const ref = pick.dataset.rtPick ?? "";
     pop.selected = pick.checked ? [...new Set([...pop.selected, ref])] : pop.selected.filter((item) => item !== ref);
