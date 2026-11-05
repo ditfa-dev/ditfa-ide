@@ -35,6 +35,7 @@ import { escapeHtml, renderMarkdown, token, whole } from "./markdown";
 import { markSvg } from "./mark";
 import { createVoiceIo } from "./voice";
 import { seatColor, seatInitials, tableDiagram, type Seat } from "./roundtableView";
+import { joinDictation } from "@ditfa-ide/core/voice/dictationText";
 
 declare function acquireVsCodeApi(): {
   postMessage(message: WebviewMessage): void;
@@ -128,7 +129,15 @@ const state: SessionState = {
       upgrade: null,
     },
     modelCapabilities: null,
-    voice: { dictation: false, conversation: false, reason: null, upgradeUrl: null, backend: null },
+    voice: {
+      dictation: false,
+      conversation: false,
+      reason: null,
+      upgradeUrl: null,
+      backend: null,
+      dictationBackend: null,
+      local: { state: "missing", model: null, step: null, percent: null, error: null, canInstall: false, installHint: null, recorderProblem: null },
+    },
   },
   entries: [],
   plan: [],
@@ -277,7 +286,7 @@ function handleMessage(message: HostMessage): void {
       renderHeader();
       renderGate();
       renderToolbar();
-      if (voiceSetup !== null) renderVoice();
+      if (voiceSetup !== null || dictationSetupOpen) renderVoice();
       renderBanner();
       renderEmpty();
       break;
@@ -298,7 +307,11 @@ function handleMessage(message: HostMessage): void {
       renderApprovals();
       break;
     case "composerInsert":
-      insertText(message.text);
+      if (message.dictation) {
+        insertDictated(message.text);
+      } else {
+        insertText(message.text);
+      }
       break;
     case "composerSet":
       composer.value = message.text;
@@ -1615,6 +1628,19 @@ function onClick(event: MouseEvent): void {
     startVoice("dictation");
   } else if (hit("[data-voice-mode]")) {
     startVoice("conversation");
+  } else if (hit("[data-dictation-install]")) {
+    const model = hit("[data-dictation-install]")?.dataset.dictationInstall === "fast" ? "fast" : "accurate";
+    dictationSetupOpen = true;
+    vscode.postMessage({ type: "setupLocalDictation", model });
+  } else if (hit("[data-dictation-cancel]")) {
+    vscode.postMessage({ type: "cancelLocalDictation" });
+  } else if (hit("[data-dictation-close]")) {
+    dictationSetupOpen = false;
+    renderVoice();
+  } else if (hit("[data-dictation-setup]")) {
+    voice = { ...voice, mode: null, phase: "idle", error: null };
+    dictationSetupOpen = true;
+    renderVoice();
   } else if (hit("[data-voice-mute]")) {
     vscode.postMessage({ type: "voiceMute", muted: !voice.muted });
   } else if (hit("[data-voice-close]")) {
@@ -2036,6 +2062,17 @@ function insertText(text: string, atCursor = false): void {
   composer.focus();
 }
 
+/** A dictated phrase at the cursor, spaced like typed words (see `joinDictation`). */
+function insertDictated(text: string): void {
+  const phrase = text.trim();
+  if (!phrase) return;
+  const start = composer.selectionStart;
+  composer.setRangeText(joinDictation(composer.value.slice(0, start), phrase), start, composer.selectionEnd, "end");
+  autoGrow();
+  saveDraft();
+  renderToolbar();
+}
+
 function autoGrow(): void {
   composer.style.height = "auto";
   composer.style.height = `${Math.min(composer.scrollHeight, 240)}px`;
@@ -2116,13 +2153,32 @@ function renderVoice(): void {
   renderVoiceScreen();
 }
 
-/** Dictation stays in the composer: a slim bar with the level and a check to type what was said. */
+/** The offline dictation setup card is open above the composer. */
+let dictationSetupOpen = false;
+
+/**
+ * Dictation stays in the composer. While it runs: a slim bar with the level, the last phrase typed, and a check
+ * to finish. Before it is set up: a card that sets up offline dictation in place.
+ */
 function renderDictationBar(): void {
   const bar = document.getElementById("voice-bar") as HTMLElement;
   const toolbar = document.getElementById("toolbar") as HTMLElement;
+  const local = state.header.voice.local;
+  if (dictationSetupOpen && local.state === "ready") {
+    // Set up while the card was open: start talking right away.
+    dictationSetupOpen = false;
+    window.setTimeout(() => startVoice("dictation"), 0);
+  }
   const dictating = voice.mode === "dictation" && (voice.active || voice.phase === "error");
-  bar.hidden = !dictating;
+  bar.hidden = !dictating && !dictationSetupOpen;
   toolbar.classList.toggle("voice-on", dictating && voice.active);
+  bar.classList.toggle("error", dictating && voice.phase === "error");
+  bar.classList.toggle("setup", !dictating && dictationSetupOpen);
+  if (!dictating && dictationSetupOpen) {
+    bar.innerHTML = dictationSetupCard();
+    renderToolbar();
+    return;
+  }
   if (!dictating) {
     bar.innerHTML = "";
     renderToolbar();
@@ -2132,9 +2188,9 @@ function renderDictationBar(): void {
     voice.phase === "connecting"
       ? "Starting the microphone…"
       : voice.phase === "listening"
-        ? "Listening… press ✓ when you are done"
+        ? "Listening · text appears as you talk"
         : voice.phase === "transcribing"
-          ? "Writing down what you said…"
+          ? "Writing down the last words…"
           : voice.phase === "error"
             ? (voice.error ?? "Dictation stopped")
             : "";
@@ -2143,12 +2199,50 @@ function renderDictationBar(): void {
     return `<span style="transform:scaleY(${height.toFixed(2)})"></span>`;
   }).join("");
   const where = voice.source === "browser" ? `<span class="voice-source">Microphone in your browser window</span>` : "";
-  bar.classList.toggle("error", voice.phase === "error");
+  const engine = voice.backend ? `<span class="voice-source">${escapeHtml(voice.backend)}</span>` : "";
+  const fix =
+    voice.phase === "error" && !state.header.voice.dictation && local.state !== "installing"
+      ? `<button class="ghost-button" type="button" data-dictation-setup>Set up offline dictation</button>`
+      : "";
   bar.innerHTML = `
     <span class="voice-orb" aria-hidden="true">${voice.phase === "transcribing" ? sparkle("Writing", 14) : bars}</span>
-    <span class="voice-text" dir="auto">${escapeHtml(phase)}${where}</span>
-    ${voice.active ? `<button class="voice-stop" type="button" data-voice-stop title="Stop and type it">${icons.check}</button>` : ""}`;
+    <span class="voice-text" dir="auto">${escapeHtml(phase)}${voice.transcript && voice.phase !== "error" ? `<small class="voice-last" dir="auto">${escapeHtml(voice.transcript)}</small>` : ""}${engine}${where}</span>
+    ${fix}
+    ${voice.active ? `<button class="voice-stop" type="button" data-voice-stop title="Done: stop dictating">${icons.check}</button>` : ""}`;
   renderToolbar();
+}
+
+/** Offline dictation: what it is, the two models, and the setup's progress, all in the composer. */
+function dictationSetupCard(): string {
+  const local = state.header.voice.local;
+  const close = `<button class="tool icon-only dict-close" type="button" data-dictation-close aria-label="Close">${icons.close}</button>`;
+  const head = `<div class="dict-head"><span class="dict-icon">${icons.mic}</span><span class="dict-title"><strong>Offline dictation</strong>
+    <small>Free and private: speech becomes text on this computer, with no account, no API and no internet.</small></span>${close}</div>`;
+  const recorder = local.recorderProblem
+    ? `<p class="dict-note warn">${icons.warn}<span>Microphone: ${escapeHtml(local.recorderProblem)}${local.canInstall ? " Setup installs sox to record instead." : ""}</span></p>`
+    : "";
+  if (local.state === "installing") {
+    const percent = local.percent;
+    return `${head}<div class="dict-progress">
+      <div class="progress${percent === null ? " indeterminate" : ""}"><div class="progress-fill" style="width:${percent === null ? 35 : whole(percent, 100)}%"></div></div>
+      <div class="dict-progress-row"><span>${escapeHtml(local.step ?? "Setting up…")}${percent === null ? "" : ` ${whole(percent, 100)}%`}</span>
+      <button class="ghost-button" type="button" data-dictation-cancel>Cancel</button></div></div>`;
+  }
+  const option = (id: "accurate" | "fast", title: string, size: string, detail: string, recommended: boolean) =>
+    `<button class="dict-option${recommended ? " recommended" : ""}" type="button" data-dictation-install="${id}">
+      <span class="dict-option-title">${escapeHtml(title)}${recommended ? `<span class="dict-badge">Recommended</span>` : ""}</span>
+      <small>${escapeHtml(detail)}</small><span class="dict-size">${escapeHtml(size)}</span></button>`;
+  const choices = local.canInstall
+    ? `<div class="dict-options">
+        ${option("accurate", "Accurate", "574 MB", "Every major language, Persian and Arabic included. Fast on Apple Silicon.", true)}
+        ${option("fast", "Fast", "82 MB", "Quickest on any computer; best for English.", false)}
+      </div>`
+    : `<p class="dict-note">${escapeHtml(local.installHint ?? "Install whisper.cpp to dictate offline.")}</p>`;
+  const error = local.error ? `<p class="dict-note error" role="alert">${icons.warn}<span>${escapeHtml(local.error)}</span></p>` : "";
+  const cloud = state.header.voice.backend
+    ? ""
+    : `<p class="dict-alt">Or dictate through <button class="link" type="button" data-sign-in>your Ditfa plan</button> or <button class="link" type="button" data-voice-add-key>an OpenAI key</button>.</p>`;
+  return `${head}${error}${recorder}${choices}<p class="dict-alt">Downloaded once and checked against its published checksum.</p>${cloud}`;
 }
 
 /** Voice mode: the whole panel becomes a conversation with Ditfa, like Ditfa's own voice mode. */
@@ -2244,15 +2338,9 @@ function startVoice(mode: "dictation" | "conversation"): void {
       renderVoice();
       return;
     }
-    // Dictation says why in the composer's bar.
-    voice = { ...voice, mode: "dictation", phase: "error", active: false, error: state.header.voice.reason ?? "Dictation needs Ditfa or an OpenAI key." };
+    // Dictation sets itself up in place: offline, free, no account.
+    dictationSetupOpen = true;
     renderVoice();
-    window.setTimeout(() => {
-      if (!voice.active && voice.phase === "error") {
-        voice = { ...voice, phase: "idle", mode: null, error: null };
-        renderVoice();
-      }
-    }, 6000);
     return;
   }
   voiceSetup = null;

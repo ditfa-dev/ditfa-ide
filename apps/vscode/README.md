@@ -20,7 +20,7 @@ For VS Code and editors built on it, such as Cursor, Windsurf, and VSCodium.
 - **Plan mode the agent cannot talk its way out of.** Read-only is enforced by the engine's sandbox, not by a prompt.
 - **Survives everything.** Conversations come back after a reload, with their commands and diffs. If the engine crashes it restarts and resumes. Stop always stops: a turn that ignores it loses its engine.
 - **Keep typing while it works.** Messages sent during a turn wait in a queue above the input; send one now, edit it, or steer the running turn with <kbd>Cmd/Ctrl</kbd>+<kbd>Enter</kbd>. You get a notification when it is done.
-- **Light on your machine.** The panel is under 100 KB of script with no framework, streaming is batched, long threads render only what is on screen, and the engine starts when you open the panel, not with the editor.
+- **Light on your machine.** The panel is under 110 KB of script with no framework, streaming is batched, long threads render only what is on screen, and the engine starts when you open the panel, not with the editor.
 - **No surprises on cost.** A context meter, tokens and the real model under every turn, and an optional hard limit per turn. An agent stuck repeating a command is stopped.
 
 ---

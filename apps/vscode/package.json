@@ -660,6 +660,22 @@
           "default": {},
           "markdownDescription": "Model used for each feature, such as `{\"completion\": \"ditfa/fast\", \"voice\": \"ditfa/voice\"}`. Easier to set in **Ditfa: Open Settings Panel**.",
           "scope": "window"
+        },
+        "ditfa.voice.dictationEngine": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "local",
+            "cloud"
+          ],
+          "enumDescriptions": [
+            "Offline on this computer when it is set up, otherwise your Ditfa plan or OpenAI key",
+            "Only offline on this computer (whisper.cpp): free, private, no internet",
+            "Only your Ditfa plan or OpenAI key"
+          ],
+          "default": "auto",
+          "markdownDescription": "What turns your speech into text when you dictate. Offline dictation is set up from the microphone button.",
+          "scope": "window"
         }
       }
     }

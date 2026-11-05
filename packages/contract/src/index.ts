@@ -342,6 +342,27 @@ export interface VoiceAvailability {
   upgradeUrl: string | null;
   /** What voice runs on: "Ditfa" (the plan) or "OpenAI" (the user's key); null when nothing is set up. */
   backend: string | null;
+  /** What dictation runs on: "On this computer" (offline), "Ditfa" or "OpenAI"; null when nothing is set up. */
+  dictationBackend: string | null;
+  /** Offline dictation on this computer (whisper.cpp). */
+  local: LocalDictationView;
+}
+
+/** Offline dictation: whether it is set up, and what it is doing while it sets itself up. */
+export interface LocalDictationView {
+  state: "missing" | "installing" | "ready" | "error";
+  /** The model on disk: "fast" or "accurate". */
+  model: "fast" | "accurate" | null;
+  /** What setup is doing now, such as "Downloading the accurate model (574 MB)…". */
+  step: string | null;
+  percent: number | null;
+  error: string | null;
+  /** One click can set it up (Homebrew on macOS, or whisper-cli already on PATH). */
+  canInstall: boolean;
+  /** What to install by hand when one click cannot. */
+  installHint: string | null;
+  /** Why no system recorder works (an ffmpeg a Homebrew upgrade broke, say); null when one does. */
+  recorderProblem: string | null;
 }
 
 /** A message typed while a turn runs, waiting to be sent when it ends. */
@@ -520,7 +541,8 @@ export type HostMessage =
   | { type: "tokenUsage"; usage: TokenUsageView | null }
   | { type: "turnActive"; active: boolean }
   | { type: "approvals"; approvals: ApprovalRequest[] }
-  | { type: "composerInsert"; text: string }
+  /** `dictation` text goes in at the cursor, spaced like typed words, instead of as a new paragraph. */
+  | { type: "composerInsert"; text: string; dictation?: boolean }
   | { type: "composerAttach"; attachment: ContextAttachment }
   | { type: "composerSet"; text: string }
   | { type: "focusComposer" }
@@ -623,6 +645,9 @@ export type WebviewMessage =
   | { type: "planAction"; action: "download" | "save" | "implement"; entryId: string }
   | { type: "voiceStart"; mode: "dictation" | "conversation" }
   | { type: "voiceStop" }
+  /** Sets up offline dictation with the chosen model, or stops a setup in progress. */
+  | { type: "setupLocalDictation"; model: "fast" | "accurate" }
+  | { type: "cancelLocalDictation" }
   /** Voice mode's mute button: audio is dropped while muted, the conversation stays open. */
   | { type: "voiceMute"; muted: boolean }
   /** Barge-in: stop speaking and listen. */

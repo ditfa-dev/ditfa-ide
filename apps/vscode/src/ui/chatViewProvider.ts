@@ -130,6 +130,11 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     this.deliver({ type: "focusComposer" });
   }
 
+  /** A dictated phrase, typed at the cursor as the user speaks. */
+  insertDictation(text: string): void {
+    this.deliver({ type: "composerInsert", text, dictation: true });
+  }
+
   dispose(): void {
     clearTimeout(this.flushTimer);
     for (const subscription of this.subscriptions) {
@@ -405,6 +410,14 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         await vscode.commands.executeCommand(
           vscode.window.activeTextEditor?.selection.isEmpty === false ? "ditfa.addSelectionToChat" : "ditfa.addFileToChat",
         );
+        break;
+
+      case "setupLocalDictation":
+        void controller.localDictation.install(message.model === "fast" ? "fast" : "accurate");
+        break;
+
+      case "cancelLocalDictation":
+        controller.localDictation.cancel();
         break;
 
       case "requestSetupOptions":

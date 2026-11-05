@@ -10,6 +10,8 @@ import { browserMicrophone, systemMicrophone, type Microphone } from "./micropho
 export interface VoiceDeps {
   /** Ditfa's voice (the plan) or the user's OpenAI key; null when neither is set up. */
   backend(): Promise<SpeechBackend | null>;
+  /** What dictation runs on: offline on this computer first, then the plan or the key. */
+  dictationBackend(): Promise<SpeechBackend | null>;
   logger: Logger;
   post(message: HostMessage): void;
   /** Puts dictated text into the composer. */
@@ -27,6 +29,10 @@ const PREROLL_FRAMES = 4;
 /** One spoken utterance at most; Ditfa's transcription limit is far above this. */
 const MAX_UTTERANCE_BYTES = 16_000 * 2 * 90;
 const MAX_DICTATION_BYTES = 16_000 * 2 * 300;
+/** A phrase longer than this is cut and typed anyway, so a long sentence without a pause still shows up. */
+const MAX_PHRASE_BYTES = 16_000 * 2 * 25;
+/** Shorter than this is a click or a breath, not a word. */
+const MIN_PHRASE_BYTES = 16_000 * 2 * 0.35;
 /** Answers longer than this (or with code) are summarized for speaking rather than read out. */
 const SPEAK_AS_IS = 500;
 
@@ -58,6 +64,10 @@ export class VoiceService implements vscode.Disposable {
   private speech: SpeechBackend | null = null;
   /** Voice mode's microphone is muted: audio is dropped, the conversation stays open. */
   private muted = false;
+  /** Dictated phrases, transcribed one after another so they are typed in the order they were said. */
+  private dictationQueue: Promise<void> = Promise.resolve();
+  /** Phrases typed in this dictation; when none were, the whole recording is tried on stop. */
+  private typed = 0;
 
   constructor(private readonly deps: VoiceDeps) {}
 
@@ -102,11 +112,17 @@ export class VoiceService implements vscode.Disposable {
     this.detector = new SpeechDetector();
     this.history = [];
     this.set({ ...idle(), active: true, mode, phase: "connecting" });
-    const backend = await this.deps.backend();
+    const backend = mode === "dictation" ? await this.deps.dictationBackend() : await this.deps.backend();
     if (!backend) {
-      this.fail("Sign in to Ditfa, or add an OpenAI API key in Settings → Models, to use voice.");
+      this.fail(
+        mode === "dictation"
+          ? "Set up offline dictation (free, no account), sign in to Ditfa, or add an OpenAI key."
+          : "Sign in to Ditfa, or add an OpenAI API key in Settings → Models, to use voice mode.",
+      );
       return;
     }
+    this.typed = 0;
+    this.dictationQueue = Promise.resolve();
     if (mode === "conversation" && !backend.speaks) {
       this.fail(`${backend.label} cannot speak right now, so voice mode is off. Dictation still works.`);
       return;
@@ -115,8 +131,13 @@ export class VoiceService implements vscode.Disposable {
     this.muted = false;
     this.set({ backend: backend.label });
     const preferred = vscode.workspace.getConfiguration("ditfa").get<string>("voice.captureSource", "auto");
-    if (preferred === "system" || preferred === "browser") {
-      await this.useMicrophone(preferred === "system" ? systemMicrophone() : this.browserMic());
+    if (preferred === "system") {
+      const system = await systemMicrophone();
+      await this.useMicrophone(system.mic, system.problem);
+      return;
+    }
+    if (preferred === "browser") {
+      await this.useMicrophone(this.browserMic());
       return;
     }
     // The panel tries first; silence or a refusal moves on to the next source.
@@ -128,16 +149,19 @@ export class VoiceService implements vscode.Disposable {
     clearTimeout(this.waitingForPanel);
     if (!this.view.active || this.mic || this.view.source === "panel") return;
     this.deps.post({ type: "voiceCapture", capture: false });
-    await this.useMicrophone(systemMicrophone() ?? this.browserMic());
+    const system = await systemMicrophone();
+    if (system.problem) this.deps.logger.warn(`system recorder: ${system.problem}`);
+    if (!this.view.active || this.mic) return;
+    await this.useMicrophone(system.mic ?? this.browserMic());
   }
 
   private browserMic(): Microphone {
     return browserMicrophone((url) => Promise.resolve(vscode.env.openExternal(vscode.Uri.parse(url))));
   }
 
-  private async useMicrophone(mic: Microphone | null): Promise<void> {
+  private async useMicrophone(mic: Microphone | null, problem: string | null = null): Promise<void> {
     if (!mic) {
-      this.fail("No microphone is available. Install sox or ffmpeg, or allow the browser to use the microphone.");
+      this.fail(problem ?? "No microphone recorder works on this computer. Set up offline dictation to install one, or install sox.");
       return;
     }
     this.mic = mic;
@@ -184,6 +208,7 @@ export class VoiceService implements vscode.Disposable {
         this.dictation.push(frame);
         this.dictationBytes += frame.length;
       }
+      this.segment(frame, level);
       return;
     }
 
@@ -207,6 +232,47 @@ export class VoiceService implements vscode.Disposable {
       this.utterance = [];
       this.utteranceBytes = 0;
       void this.converse(audio);
+    }
+  }
+
+  /** Live dictation: each phrase is typed when the user pauses (or after 25 s of talking without one). */
+  private segment(frame: Uint8Array, level: number): void {
+    const event = this.detector.push(level);
+    if (event === "start") {
+      this.utterance = [...this.preroll];
+      this.utteranceBytes = this.utterance.reduce((sum, chunk) => sum + chunk.length, 0);
+    }
+    if (this.detector.isSpeaking || event === "end") {
+      this.utterance.push(frame);
+      this.utteranceBytes += frame.length;
+      if (event === "end" || this.utteranceBytes >= MAX_PHRASE_BYTES) this.flushPhrase();
+    } else {
+      this.preroll.push(frame);
+      if (this.preroll.length > PREROLL_FRAMES) this.preroll.shift();
+    }
+  }
+
+  private flushPhrase(): void {
+    const audio = concat(this.utterance);
+    this.utterance = [];
+    this.utteranceBytes = 0;
+    if (audio.length < MIN_PHRASE_BYTES) return;
+    this.dictationQueue = this.dictationQueue.then(() => this.typePhrase(audio));
+  }
+
+  private async typePhrase(audio: Uint8Array): Promise<void> {
+    const speech = this.speech;
+    if (!speech) return;
+    this.set({ transcript: this.view.transcript, phase: this.view.active ? "listening" : "transcribing" });
+    try {
+      const text = await speech.transcribe(encodeWav(audio), { language: this.language() });
+      if (text) {
+        this.typed += 1;
+        this.deps.insert(text);
+        this.set({ transcript: text });
+      }
+    } catch (error) {
+      this.fail(`Dictation failed: ${error instanceof Error ? error.message : String(error)}`);
     }
   }
 
@@ -333,25 +399,37 @@ export class VoiceService implements vscode.Disposable {
     this.deps.post({ type: "voicePlaybackStop" });
     this.dictation = [];
     this.dictationBytes = 0;
-    this.utterance = [];
+    if (!(finishDictation && wasDictation)) {
+      this.utterance = [];
+      this.utteranceBytes = 0;
+    }
     this.preroll = [];
     this.pending = new Uint8Array(0);
 
-    if (finishDictation && wasDictation && recording.length >= 16_000 * 2 * 0.3) {
+    if (finishDictation && wasDictation) {
       this.set({ phase: "transcribing", level: 0 });
-      try {
-        const text = await this.requireSpeech().transcribe(encodeWav(recording), { language: this.language() });
-        if (text) this.deps.insert(text);
-        else {
-          this.fail("Nothing was heard. Check the microphone and try again.");
+      // The phrase still being spoken, then everything already queued, in order.
+      if (this.utteranceBytes > 0) this.flushPhrase();
+      await this.dictationQueue;
+      if (this.view.phase === "error") return;
+      if (this.typed === 0 && recording.length >= MIN_PHRASE_BYTES) {
+        // A quiet voice the pause detector never caught: try the whole recording once.
+        try {
+          const text = await this.requireSpeech().transcribe(encodeWav(recording), { language: this.language() });
+          if (text) this.deps.insert(text);
+          else {
+            this.fail("Nothing was heard. Check the microphone and try again.");
+            return;
+          }
+        } catch (error) {
+          // Shown in the panel, under the composer, not as an editor notification.
+          this.fail(`Dictation failed: ${error instanceof Error ? error.message : String(error)}`);
           return;
         }
-      } catch (error) {
-        // Shown in the panel, under the composer, not as an editor notification.
-        this.fail(`Dictation failed: ${error instanceof Error ? error.message : String(error)}`);
-        return;
       }
     }
+    this.utterance = [];
+    this.utteranceBytes = 0;
     this.speech = null;
     this.set(idle());
   }

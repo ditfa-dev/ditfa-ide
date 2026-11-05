@@ -61,6 +61,7 @@ import type {
   ThreadSummary,
   VoiceAvailability,
 } from "@ditfa-ide/contract";
+import { LocalDictation } from "@ditfa-ide/vscode/voice/localDictation";
 import type { Logger } from "@ditfa-ide/vscode/util/logger";
 import {
   permissionFromSettings,
@@ -135,6 +136,8 @@ export class DitfaController implements vscode.Disposable {
   private providerReady = false;
   /** An OpenAI key is in the keychain: dictation and voice mode can run on it without a Ditfa plan. */
   private openAiKeyStored = false;
+  /** Offline dictation with whisper.cpp: free, private, no account. */
+  readonly localDictation: LocalDictation;
 
   private readonly keys: ApiKeys;
   /** The Ditfa account: browser sign-in, plan, usage, and the keys the engine runs with. */
@@ -190,6 +193,7 @@ export class DitfaController implements vscode.Disposable {
     private readonly logger: Logger,
   ) {
     this.keys = new ApiKeys(context.secrets);
+    this.localDictation = new LocalDictation(context.globalStorageUri.fsPath, logger, () => this.pushHeader());
     this.ditfa = new DitfaAccount(context.secrets, this.keys, logger, this.extensionVersion());
     this.roundTable = new RoundTableService({
       ditfa: this.ditfa,
@@ -1816,37 +1820,71 @@ export class DitfaController implements vscode.Disposable {
     return key ? openAiSpeech(key) : null;
   }
 
+  /**
+   * What dictation runs on. `auto` prefers offline dictation on this computer (free, private) and falls back to
+   * the Ditfa plan or an OpenAI key; `local` and `cloud` keep to one side.
+   */
+  async dictationBackend(): Promise<SpeechBackend | null> {
+    const engine = vscode.workspace.getConfiguration("ditfa").get<string>("voice.dictationEngine", "auto");
+    if (engine !== "cloud") {
+      const local = this.localDictation.backend(() => this.dictationVocabulary());
+      if (local || engine === "local") return local;
+    }
+    return this.voiceBackend();
+  }
+
+  /** Words Whisper should expect: the open file, its language and the project, so code names come out right. */
+  private dictationVocabulary(): string {
+    const editor = vscode.window.activeTextEditor;
+    const folder = vscode.workspace.workspaceFolders?.[0]?.name ?? "";
+    const file = editor ? editor.document.fileName.split(/[\\/]/).pop() ?? "" : "";
+    const language = editor?.document.languageId ?? "";
+    return [folder, file, language].filter(Boolean).join(", ");
+  }
+
+  private dictationLabel(): string | null {
+    const engine = vscode.workspace.getConfiguration("ditfa").get<string>("voice.dictationEngine", "auto");
+    if (engine !== "cloud" && this.localDictation.ready()) return "On this computer";
+    if (engine === "local") return null;
+    return this.ditfaVoiceReady() ? "Ditfa" : this.openAiKeyStored ? "OpenAI" : null;
+  }
+
   private voiceAvailability(): VoiceAvailability {
+    const local = this.localDictation.view();
+    const dictationBackend = this.dictationLabel();
+    const withDictation = (availability: Omit<VoiceAvailability, "local" | "dictationBackend" | "dictation">): VoiceAvailability => ({
+      ...availability,
+      dictation: dictationBackend !== null,
+      dictationBackend,
+      local,
+    });
     const config = this.voiceConfig;
     if (this.ditfaVoiceReady()) {
-      return {
-        dictation: true,
+      return withDictation({
         conversation: Boolean(config?.speech),
         reason: config?.speech ? null : "Ditfa's voices are not available right now.",
         upgradeUrl: null,
         backend: "Ditfa",
-      };
+      });
     }
     if (this.openAiKeyStored) {
-      return { dictation: true, conversation: true, reason: null, upgradeUrl: null, backend: "OpenAI" };
+      return withDictation({ conversation: true, reason: null, upgradeUrl: null, backend: "OpenAI" });
     }
     if (this.ditfa.signedIn && config && !config.planAllowsVoice) {
       const view = this.ditfa.view;
-      return {
-        dictation: false,
+      return withDictation({
         conversation: false,
         reason: "Voice comes with Ditfa Plus and above, or add an OpenAI API key in Settings → Models.",
         upgradeUrl: view.profile?.upgrade?.url ?? view.links?.billing ?? null,
         backend: null,
-      };
+      });
     }
-    return {
-      dictation: false,
+    return withDictation({
       conversation: false,
-      reason: this.ditfa.signedIn && !config ? "Checking voice…" : "Sign in to Ditfa, or add an OpenAI API key, to use voice.",
+      reason: this.ditfa.signedIn && !config ? "Checking voice…" : "Sign in to Ditfa, or add an OpenAI API key, to use voice mode.",
       upgradeUrl: null,
       backend: null,
-    };
+    });
   }
 
   private activeFileContext(): ActiveFileContext | null {

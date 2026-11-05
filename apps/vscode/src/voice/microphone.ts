@@ -11,7 +11,7 @@ export interface Microphone {
   stop(): void;
 }
 
-function onPath(binary: string): string | null {
+export function onPath(binary: string): string | null {
   const names = process.platform === "win32" ? [`${binary}.exe`, binary] : [binary];
   for (const dir of (process.env.PATH ?? "").split(delimiter)) {
     for (const name of names) {
@@ -25,28 +25,80 @@ function onPath(binary: string): string | null {
   return null;
 }
 
+export interface SystemMicrophone {
+  mic: Microphone | null;
+  /** Why no recorder can be used, such as "ffmpeg is installed but does not start: …"; null when one works. */
+  problem: string | null;
+}
+
+/** Runs `bin args` and resolves with whether it exited cleanly, and the first line it complained with. */
+function probe(bin: string, args: string[]): Promise<{ ok: boolean; error: string }> {
+  return new Promise((resolve) => {
+    let stderr = "";
+    const child = spawn(bin, args, { stdio: ["ignore", "ignore", "pipe"] });
+    const timer = setTimeout(() => {
+      child.kill();
+      resolve({ ok: false, error: "did not answer" });
+    }, 4000);
+    child.stderr?.on("data", (chunk: Buffer) => {
+      stderr = `${stderr}${chunk.toString()}`.slice(0, 2000);
+    });
+    child.on("error", (error) => {
+      clearTimeout(timer);
+      resolve({ ok: false, error: error.message });
+    });
+    child.on("exit", (code) => {
+      clearTimeout(timer);
+      resolve({ ok: code === 0, error: firstProblem(stderr) || `exited with ${code}` });
+    });
+  });
+}
+
+/** The line that says what is wrong, such as the library a broken Homebrew install is missing. */
+function firstProblem(stderr: string): string {
+  const missing = /Library not loaded: (\S+)/.exec(stderr);
+  if (missing) return `a library it needs is missing (${missing[1]?.split("/").pop() ?? "unknown"})`;
+  return stderr.split(/\r?\n/).find((line) => line.trim())?.trim().slice(0, 160) ?? "";
+}
+
 /**
- * The machine's own recorder, when one is installed: `sox` (any OS) or `ffmpeg` (with the platform's capture
- * device). No window opens; the OS may ask once for microphone permission for the editor.
+ * The machine's own recorder: `sox` (any OS) or `ffmpeg` (with the platform's capture device), whichever is
+ * installed and actually starts. A recorder that is installed but broken (a Homebrew upgrade that removed a
+ * library, say) is skipped, and the reason is kept for the panel. No window opens; the OS may ask once for
+ * microphone permission for the editor.
  */
-export function systemMicrophone(): Microphone | null {
-  const sox = onPath("sox");
-  const ffmpeg = onPath("ffmpeg");
+export async function systemMicrophone(): Promise<SystemMicrophone> {
   const raw = ["-t", "raw", "-r", "16000", "-e", "signed-integer", "-b", "16", "-c", "1", "-"];
-  let command: { bin: string; args: string[] } | null = null;
+  const problems: string[] = [];
+  const sox = onPath("sox");
   if (sox) {
-    command = { bin: sox, args: ["-q", "-d", ...raw] };
-  } else if (ffmpeg) {
-    const input =
-      process.platform === "darwin"
-        ? ["-f", "avfoundation", "-i", ":0"]
-        : process.platform === "win32"
-          ? ["-f", "dshow", "-i", "audio=default"]
-          : ["-f", "pulse", "-i", "default"];
-    command = { bin: ffmpeg, args: ["-hide_banner", "-loglevel", "error", ...input, "-ac", "1", "-ar", "16000", "-f", "s16le", "-"] };
+    const check = await probe(sox, ["--version"]);
+    if (check.ok) return { mic: recorder(sox, ["-q", "-d", ...raw]), problem: null };
+    problems.push(`sox is installed but does not start: ${check.error}`);
   }
-  if (!command) return null;
-  const { bin, args } = command;
+  const ffmpeg = onPath("ffmpeg");
+  if (ffmpeg) {
+    const check = await probe(ffmpeg, ["-hide_banner", "-version"]);
+    if (check.ok) {
+      const input =
+        process.platform === "darwin"
+          ? ["-f", "avfoundation", "-i", ":0"]
+          : process.platform === "win32"
+            ? ["-f", "dshow", "-i", "audio=default"]
+            : ["-f", "pulse", "-i", "default"];
+      return {
+        mic: recorder(ffmpeg, ["-hide_banner", "-loglevel", "error", ...input, "-ac", "1", "-ar", "16000", "-f", "s16le", "-"]),
+        problem: null,
+      };
+    }
+    problems.push(
+      `ffmpeg is installed but does not start: ${check.error}.${process.platform === "darwin" ? " Run: brew reinstall ffmpeg" : ""}`,
+    );
+  }
+  return { mic: null, problem: problems.join(" ") || null };
+}
+
+function recorder(bin: string, args: string[]): Microphone {
   let child: ChildProcess | null = null;
   return {
     source: "system",
@@ -58,7 +110,9 @@ export function systemMicrophone(): Microphone | null {
         stderr = `${stderr}${chunk.toString()}`.slice(-400);
       });
       child.on("error", (error) => onEnded(error.message));
-      child.on("exit", (code) => onEnded(code === 0 || code === null ? null : stderr.trim() || `recorder exited with ${code}`));
+      child.on("exit", (code) =>
+        onEnded(code === 0 || code === null ? null : firstProblem(stderr) || `the recorder stopped (${code})`),
+      );
     },
     stop() {
       child?.kill();

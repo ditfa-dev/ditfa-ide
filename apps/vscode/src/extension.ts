@@ -40,9 +40,10 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const voice = new VoiceService({
     backend: () => controller.voiceBackend(),
+    dictationBackend: () => controller.dictationBackend(),
     logger,
     post: (message) => view.postToView(message),
-    insert: (text) => view.insertIntoComposer(text),
+    insert: (text) => view.insertDictation(text),
     ask: (text) => controller.askAndWait(text),
     speakerTarget: () => controller.completion.chatTarget(),
   });

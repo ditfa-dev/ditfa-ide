@@ -2965,3 +2965,134 @@ button.primary.large {
     animation: none;
   }
 }
+
+/* ─── Dictation: live bar and offline setup card ─── */
+.voice-last {
+  display: block;
+  overflow: hidden;
+  color: var(--fg);
+  opacity: 0.75;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.voice-bar.setup {
+  display: block;
+  padding: 12px 12px 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--fg) 8%, transparent);
+}
+.dict-head {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+.dict-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: none;
+  width: 30px;
+  height: 30px;
+  border-radius: 50%;
+  background: var(--brand-gradient);
+  color: #fff;
+}
+.dict-title {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+.dict-title small,
+.dict-alt,
+.dict-note {
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+.dict-options {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 10px;
+}
+.dict-option {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  padding: 10px 11px;
+  border: 1px solid color-mix(in srgb, var(--fg) 14%, transparent);
+  border-radius: 12px;
+  text-align: start;
+  transition: border-color 0.15s, background 0.15s;
+}
+.dict-option:hover {
+  border-color: color-mix(in srgb, var(--accent) 60%, transparent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.dict-option.recommended {
+  border-color: color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.dict-option-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.dict-option small {
+  color: var(--muted);
+  font-size: 10.5px;
+  line-height: 1.4;
+}
+.dict-badge {
+  padding: 0 6px;
+  border-radius: 8px;
+  background: color-mix(in srgb, var(--accent) 18%, transparent);
+  color: var(--accent);
+  font-size: 9.5px;
+  font-weight: 600;
+}
+.dict-size {
+  color: var(--muted);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+}
+.dict-alt {
+  margin: 8px 0 0;
+}
+.dict-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 5px;
+  margin: 8px 0 0;
+}
+.dict-note.warn {
+  color: var(--warn);
+}
+.dict-note.error {
+  color: var(--danger);
+}
+.dict-progress {
+  margin-top: 12px;
+}
+.dict-progress-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-top: 6px;
+  color: var(--muted);
+  font-size: 11px;
+}
+.progress.indeterminate .progress-fill {
+  animation: dict-slide 1.2s ease-in-out infinite;
+}
+@keyframes dict-slide {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(300%);
+  }
+}
