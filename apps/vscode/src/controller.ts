@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { join } from "node:path";
 import * as vscode from "vscode";
 
-import { contextWindowTokens, planLabel, type VoiceConfig } from "@ditfa-ide/cloud";
+import { contextWindowTokens, ditfaSpeech, openAiSpeech, planLabel, type SpeechBackend, type VoiceConfig } from "@ditfa-ide/cloud";
 import { AccountManager } from "@ditfa-ide/vscode/account/accountManager";
 import { DitfaAccount, DITFA_TOOLS_ENV } from "@ditfa-ide/vscode/account/ditfaAccount";
 import { RoundTableService } from "@ditfa-ide/vscode/roundtable/roundTableService";
@@ -133,6 +133,8 @@ export class DitfaController implements vscode.Disposable {
   private budgetTripped = false;
   /** Set when a key for the selected provider is stored or the provider needs none. */
   private providerReady = false;
+  /** An OpenAI key is in the keychain: dictation and voice mode can run on it without a Ditfa plan. */
+  private openAiKeyStored = false;
 
   private readonly keys: ApiKeys;
   /** The Ditfa account: browser sign-in, plan, usage, and the keys the engine runs with. */
@@ -1796,28 +1798,54 @@ export class DitfaController implements vscode.Disposable {
     };
   }
 
-  private voiceAvailability(): VoiceAvailability {
-    if (!this.ditfa.signedIn) {
-      return { dictation: false, conversation: false, reason: "Sign in to Ditfa to talk to Ditfa Code.", upgradeUrl: null };
-    }
+  /** Ditfa's voice when the plan includes it. */
+  private ditfaVoiceReady(): boolean {
     const config = this.voiceConfig;
-    if (!config) {
-      return { dictation: false, conversation: false, reason: "Checking voice…", upgradeUrl: null };
+    return this.ditfa.signedIn && Boolean(config?.planAllowsVoice && config.transcription);
+  }
+
+  /**
+   * What dictation and voice mode run on: the Ditfa plan's voice when it has one, otherwise the user's own
+   * OpenAI key (transcription and speech), otherwise nothing.
+   */
+  async voiceBackend(): Promise<SpeechBackend | null> {
+    if (this.ditfaVoiceReady()) {
+      return ditfaSpeech(this.ditfa.cloud, Boolean(this.voiceConfig?.speech));
     }
-    if (!config.planAllowsVoice) {
+    const key = await this.keys.get(OPENAI_KEY_ENV);
+    return key ? openAiSpeech(key) : null;
+  }
+
+  private voiceAvailability(): VoiceAvailability {
+    const config = this.voiceConfig;
+    if (this.ditfaVoiceReady()) {
+      return {
+        dictation: true,
+        conversation: Boolean(config?.speech),
+        reason: config?.speech ? null : "Ditfa's voices are not available right now.",
+        upgradeUrl: null,
+        backend: "Ditfa",
+      };
+    }
+    if (this.openAiKeyStored) {
+      return { dictation: true, conversation: true, reason: null, upgradeUrl: null, backend: "OpenAI" };
+    }
+    if (this.ditfa.signedIn && config && !config.planAllowsVoice) {
       const view = this.ditfa.view;
       return {
         dictation: false,
         conversation: false,
-        reason: "Voice comes with Ditfa Plus and above.",
+        reason: "Voice comes with Ditfa Plus and above, or add an OpenAI API key in Settings → Models.",
         upgradeUrl: view.profile?.upgrade?.url ?? view.links?.billing ?? null,
+        backend: null,
       };
     }
     return {
-      dictation: config.transcription,
-      conversation: config.transcription && config.speech,
-      reason: config.transcription ? null : "Voice is not available right now.",
+      dictation: false,
+      conversation: false,
+      reason: this.ditfa.signedIn && !config ? "Checking voice…" : "Sign in to Ditfa, or add an OpenAI API key, to use voice.",
       upgradeUrl: null,
+      backend: null,
     };
   }
 
@@ -1841,6 +1869,8 @@ export class DitfaController implements vscode.Disposable {
   }
 
   private async refreshProviderReady(): Promise<void> {
+    // Voice can run on the user's own OpenAI key; the header says so without an async check.
+    this.openAiKeyStored = await this.keys.has(OPENAI_KEY_ENV);
     const id = this.effectiveProviderId();
     const provider = BUILT_IN_PROVIDERS.find((candidate) => candidate.id === id);
     const signedIn = Boolean(this.account?.current.account) || (provider?.id === "ditfa" && this.ditfa.signedIn);

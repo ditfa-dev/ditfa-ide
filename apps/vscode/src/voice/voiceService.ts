@@ -1,6 +1,6 @@
 import * as vscode from "vscode";
 
-import { SentenceChunker, encodeWav, streamChat, type DitfaCloud, type LlmEndpoint, type LlmMessage } from "@ditfa-ide/cloud";
+import { SentenceChunker, encodeWav, streamChat, type LlmEndpoint, type LlmMessage, type SpeechBackend } from "@ditfa-ide/cloud";
 import type { HostMessage, VoiceView, WebviewMessage } from "@ditfa-ide/contract";
 import { SpeechDetector, pcm16Level } from "@ditfa-ide/core/voice/speechDetector";
 import type { TargetResult } from "@ditfa-ide/vscode/completion/target";
@@ -8,7 +8,8 @@ import type { Logger } from "@ditfa-ide/vscode/util/logger";
 import { browserMicrophone, systemMicrophone, type Microphone } from "./microphone";
 
 export interface VoiceDeps {
-  cloud: DitfaCloud;
+  /** Ditfa's voice (the plan) or the user's OpenAI key; null when neither is set up. */
+  backend(): Promise<SpeechBackend | null>;
   logger: Logger;
   post(message: HostMessage): void;
   /** Puts dictated text into the composer. */
@@ -36,8 +37,8 @@ const SPEAKER_SYSTEM =
  * Voice for the panel: dictation (speech into the composer) and voice mode (talk, and Ditfa answers out loud).
  *
  * The microphone is the panel's when the editor allows it, else a system recorder (sox or ffmpeg) when one is
- * installed, else a small page in the browser. Speech becomes text through Ditfa's transcription and answers become
- * speech through Ditfa's voices, so both need a Ditfa plan with voice.
+ * installed, else a small page in the browser. Speech becomes text, and answers become speech, through the Ditfa
+ * plan's voice or the user's own OpenAI key (see `VoiceDeps.backend`).
  */
 export class VoiceService implements vscode.Disposable {
   private view: VoiceView = idle();
@@ -53,6 +54,10 @@ export class VoiceService implements vscode.Disposable {
   private history: LlmMessage[] = [];
   private speakCounter = 0;
   private waitingForPanel: NodeJS.Timeout | undefined;
+  /** The backend this session started with. */
+  private speech: SpeechBackend | null = null;
+  /** Voice mode's microphone is muted: audio is dropped, the conversation stays open. */
+  private muted = false;
 
   constructor(private readonly deps: VoiceDeps) {}
 
@@ -76,6 +81,10 @@ export class VoiceService implements vscode.Disposable {
         this.deps.logger.info(`panel microphone unavailable: ${message.reason}`);
         await this.fallback();
         break;
+      case "voiceMute":
+        this.muted = message.muted;
+        this.set({ muted: message.muted, level: 0 });
+        break;
       case "voicePlaybackEnded":
         if (this.view.active && this.view.phase === "speaking") this.set({ phase: "listening" });
         break;
@@ -93,6 +102,18 @@ export class VoiceService implements vscode.Disposable {
     this.detector = new SpeechDetector();
     this.history = [];
     this.set({ ...idle(), active: true, mode, phase: "connecting" });
+    const backend = await this.deps.backend();
+    if (!backend) {
+      this.fail("Sign in to Ditfa, or add an OpenAI API key in Settings → Models, to use voice.");
+      return;
+    }
+    if (mode === "conversation" && !backend.speaks) {
+      this.fail(`${backend.label} cannot speak right now, so voice mode is off. Dictation still works.`);
+      return;
+    }
+    this.speech = backend;
+    this.muted = false;
+    this.set({ backend: backend.label });
     const preferred = vscode.workspace.getConfiguration("ditfa").get<string>("voice.captureSource", "auto");
     if (preferred === "system" || preferred === "browser") {
       await this.useMicrophone(preferred === "system" ? systemMicrophone() : this.browserMic());
@@ -151,6 +172,10 @@ export class VoiceService implements vscode.Disposable {
   }
 
   private onFrame(frame: Uint8Array): void {
+    if (this.muted) {
+      this.set({ level: 0 });
+      return;
+    }
     const level = pcm16Level(frame);
     this.set({ level });
 
@@ -189,7 +214,7 @@ export class VoiceService implements vscode.Disposable {
     this.set({ phase: "transcribing" });
     let text: string;
     try {
-      text = await this.deps.cloud.transcribe(encodeWav(audio), { language: this.language() });
+      text = await this.requireSpeech().transcribe(encodeWav(audio), { language: this.language() });
     } catch (error) {
       this.fail(error instanceof Error ? error.message : String(error));
       return;
@@ -275,10 +300,10 @@ export class VoiceService implements vscode.Disposable {
   private async say(text: string, signal: AbortSignal): Promise<void> {
     if (!text.trim() || signal.aborted || !this.view.active) return;
     const voice = vscode.workspace.getConfiguration("ditfa").get<string>("voice.voice", "nova") || "nova";
-    const audio = await this.deps.cloud.synthesize(text, voice, signal);
-    if (!audio || signal.aborted) return;
-    const bytes = new Uint8Array(await new Response(audio.body).arrayBuffer());
-    if (signal.aborted || !this.view.active) return;
+    const audio = await this.requireSpeech().synthesize(text, voice, signal);
+    if (!audio || signal.aborted || !this.view.active) return;
+    const bytes = audio.bytes;
+    this.set({ answer: text });
     this.speakCounter += 1;
     this.set({ phase: "speaking" });
     this.deps.post({
@@ -315,12 +340,19 @@ export class VoiceService implements vscode.Disposable {
     if (finishDictation && wasDictation && recording.length >= 16_000 * 2 * 0.3) {
       this.set({ phase: "transcribing", level: 0 });
       try {
-        const text = await this.deps.cloud.transcribe(encodeWav(recording), { language: this.language() });
+        const text = await this.requireSpeech().transcribe(encodeWav(recording), { language: this.language() });
         if (text) this.deps.insert(text);
+        else {
+          this.fail("Nothing was heard. Check the microphone and try again.");
+          return;
+        }
       } catch (error) {
-        void vscode.window.showWarningMessage(`Dictation failed: ${error instanceof Error ? error.message : String(error)}`);
+        // Shown in the panel, under the composer, not as an editor notification.
+        this.fail(`Dictation failed: ${error instanceof Error ? error.message : String(error)}`);
+        return;
       }
     }
+    this.speech = null;
     this.set(idle());
   }
 
@@ -334,6 +366,11 @@ export class VoiceService implements vscode.Disposable {
       apiKey: target.apiKey ?? null,
       model: target.model,
     };
+  }
+
+  private requireSpeech(): SpeechBackend {
+    if (!this.speech) throw new Error("Voice is not set up.");
+    return this.speech;
   }
 
   private language(): string {
@@ -359,7 +396,7 @@ export class VoiceService implements vscode.Disposable {
 }
 
 function idle(): VoiceView {
-  return { active: false, mode: null, phase: "idle", level: 0, transcript: "", error: null, source: null };
+  return { active: false, mode: null, phase: "idle", level: 0, transcript: "", answer: "", error: null, source: null, muted: false, backend: null };
 }
 
 function concat(chunks: Uint8Array[]): Uint8Array {

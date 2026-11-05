@@ -13,6 +13,8 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - **The model menu switches providers itself.** Tabs for Ditfa, OpenAI, Anthropic, Gemini, OpenRouter, DeepSeek, Ollama and LM Studio show which ones are ready; a provider that is not set up shows its key form, sign-in or start command right there.
 - **A new composer**, like Ditfa on the web: a soft rounded box; a menu for files, commands, references, the open file, round table and settings; the model with ⌃⌄; and voice mode in the send button's place while the box is empty.
 - **Attach files from the system file dialog** and the open file or selection from the composer menu.
+- **Voice mode at the top of the panel.** The whole panel becomes a conversation, like Ditfa's own voice mode: a white orb that follows your voice, listens, thinks and speaks, shows what you said and what Ditfa answered, with mute and end buttons. Talk or tap the orb to interrupt.
+- **Voice with your own OpenAI key.** Dictation and voice mode run on the Ditfa plan's voice, or, without a Ditfa sign-in, on an OpenAI key you added (transcription and speech).
 
 ### Changed
 

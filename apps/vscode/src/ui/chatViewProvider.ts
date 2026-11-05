@@ -372,6 +372,7 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
 
       case "voiceStart":
       case "voiceStop":
+      case "voiceMute":
       case "voiceInterrupt":
       case "voiceAudio":
       case "voiceCaptureFailed":

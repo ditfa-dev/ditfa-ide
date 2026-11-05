@@ -97,10 +97,10 @@ The leader is the strongest participant unless you pick one. Every model has its
 
 ## Voice
 
-- **Dictation** (microphone button): speak, and the text lands in the message box. Nothing else happens until you send it.
-- **Voice mode** (waveform button): a conversation. Ditfa listens, works, and answers out loud in your language; talk over it to interrupt. By default requests go to the agent and you hear a short summary of what it did; set `ditfa.voice.target` to `assistant` for quick spoken answers that never edit files.
+- **Dictation** (microphone button in the message box): speak, press ✓, and the text lands in the message box. Nothing else happens until you send it.
+- **Voice mode** (waveform button at the top of the panel): the whole panel becomes a conversation. Ditfa listens, works, and answers out loud in your language; talk over it to interrupt. By default requests go to the agent and you hear a short summary of what it did; set `ditfa.voice.target` to `assistant` for quick spoken answers that never edit files.
 
-Voice uses your Ditfa plan. The microphone is recorded in the panel, or with `sox`/`ffmpeg`, or in a small local browser page, whichever works (`ditfa.voice.captureSource`).
+Voice runs on your Ditfa plan, or, without signing in, on an OpenAI API key you added (Settings → Models). The microphone is recorded in the panel, or with `sox`/`ffmpeg`, or in a small local browser page, whichever works (`ditfa.voice.captureSource`).
 
 ---
 

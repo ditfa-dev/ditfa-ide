@@ -128,7 +128,7 @@ const state: SessionState = {
       upgrade: null,
     },
     modelCapabilities: null,
-    voice: { dictation: false, conversation: false, reason: null, upgradeUrl: null },
+    voice: { dictation: false, conversation: false, reason: null, upgradeUrl: null, backend: null },
   },
   entries: [],
   plan: [],
@@ -147,6 +147,9 @@ let voice: VoiceView = {
   phase: "idle",
   level: 0,
   transcript: "",
+  answer: "",
+  muted: false,
+  backend: null,
   error: null,
   source: null,
 };
@@ -212,13 +215,13 @@ root.innerHTML = `
         <button class="ring" id="ring" type="button" hidden></button>
         <button class="tool model" id="model-button" type="button" aria-haspopup="menu"></button>
         <button class="tool icon-only" id="dictate" type="button" aria-label="Dictate">${icons.mic}</button>
-        <button class="round talk" id="talk" type="button" aria-label="Voice mode">${icons.wave}</button>
         <button class="round send" id="send" type="button" title="Send">${icons.send}</button>
       </div>
       <div class="composer-hint" id="composer-hint" hidden></div>
     </div>
   </footer>
   <section class="gate" id="gate" hidden></section>
+  <section class="voice-mode" id="voice-mode" role="dialog" aria-modal="true" aria-label="Voice mode" hidden></section>
   <section class="history" id="history" hidden></section>
 `;
 
@@ -274,6 +277,7 @@ function handleMessage(message: HostMessage): void {
       renderHeader();
       renderGate();
       renderToolbar();
+      if (voiceSetup !== null) renderVoice();
       renderBanner();
       renderEmpty();
       break;
@@ -405,6 +409,9 @@ function renderHeader(): void {
     <button class="thread-title" type="button" data-open-history title="Conversations">
       <span>${escapeHtml(title)}</span>${icons.chevron}
     </button>
+    <button class="voice-launch${state.header.voice.conversation ? "" : " unavailable"}" type="button" data-voice-mode
+      title="${escapeHtml(state.header.voice.conversation ? `Voice mode: talk with Ditfa${state.header.voice.backend ? ` (${state.header.voice.backend})` : ""}` : (state.header.voice.reason ?? "Voice mode"))}"
+      aria-label="Voice mode">${icons.wave}</button>
     <button class="tool" type="button" data-new-thread title="New conversation">${icons.plus}</button>
     <button class="tool" type="button" data-open-history title="Conversations">${icons.history}</button>
     ${accountChip()}
@@ -984,9 +991,7 @@ function renderToolbar(): void {
   send.title = stop ? "Stop" : state.turnActive ? "Queue: send when this turn ends" : "Send";
   send.classList.toggle("stop", stop);
   send.disabled = header.connection !== "ready";
-  // Like Ditfa on the web: an empty composer offers voice mode in the send button's place.
-  const box = document.getElementById("composer-box") as HTMLElement;
-  box.classList.toggle("talk-ready", !typed && attachments.length === 0 && !state.turnActive && header.voice.conversation && !voice.active);
+
 
   const hint = document.getElementById("composer-hint") as HTMLElement;
   hint.hidden = !(state.turnActive && typed);
@@ -1002,14 +1007,11 @@ function renderToolbar(): void {
 
   const caps = header.modelCapabilities;
   const dictate = document.getElementById("dictate") as HTMLButtonElement;
-  const talk = document.getElementById("talk") as HTMLButtonElement;
-  const voiceReason = header.voice.reason ?? "";
   dictate.classList.toggle("unavailable", !header.voice.dictation);
-  talk.classList.toggle("unavailable", !header.voice.conversation);
-  dictate.title = header.voice.dictation ? "Dictate: type with your voice" : voiceReason;
-  talk.title = header.voice.conversation ? "Voice mode: talk with Ditfa" : voiceReason;
-  dictate.hidden = voice.active;
-  talk.hidden = voice.active;
+  dictate.title = header.voice.dictation
+    ? `Dictate: say it and Ditfa types it${header.voice.backend ? ` (${header.voice.backend})` : ""}`
+    : (header.voice.reason ?? "Dictation");
+  dictate.hidden = voice.active && voice.mode === "dictation";
   (document.getElementById("attach") as HTMLButtonElement).title =
     caps && !caps.vision ? "Files, commands and tools. This model does not read images." : "Files, commands and tools";
 
@@ -1374,6 +1376,13 @@ function wireEvents(): void {
 
 function onRootKey(event: KeyboardEvent): void {
   const target = event.target as HTMLElement;
+  if (event.key === "Escape" && root.classList.contains("voice-open")) {
+    event.preventDefault();
+    voiceSetup = null;
+    if (voice.active) vscode.postMessage({ type: "voiceStop" });
+    renderVoice();
+    return;
+  }
   if (target.matches("[data-gate-input]")) {
     if (event.key === "Enter" && !event.isComposing) {
       event.preventDefault();
@@ -1604,8 +1613,23 @@ function onClick(event: MouseEvent): void {
     openRoundTable();
   } else if (hit("#dictate")) {
     startVoice("dictation");
-  } else if (hit("#talk")) {
+  } else if (hit("[data-voice-mode]")) {
     startVoice("conversation");
+  } else if (hit("[data-voice-mute]")) {
+    vscode.postMessage({ type: "voiceMute", muted: !voice.muted });
+  } else if (hit("[data-voice-close]")) {
+    voiceSetup = null;
+    if (voice.active) vscode.postMessage({ type: "voiceStop" });
+    renderVoice();
+  } else if (hit("[data-voice-orb]") && voice.phase === "speaking") {
+    vscode.postMessage({ type: "voiceInterrupt" });
+  } else if (hit("[data-voice-add-key]")) {
+    voiceSetup = null;
+    renderVoice();
+    popover = { kind: "models", catalog: null, index: 0, filter: "", provider: "openai", tabs: [] };
+    setupForm = "openai";
+    renderPopover();
+    vscode.postMessage({ type: "requestModels", provider: "openai" });
   } else if (hit("#model-button")) {
     if (popover?.kind === "models") {
       closePopover();
@@ -2082,54 +2106,156 @@ function renderQueue(): void {
     ${rows}`;
 }
 
+/** Voice mode's screen, when it is open for setup (nothing to talk with yet): the reason to show. */
+let voiceSetup: string | null = null;
+/** What the voice screen was last drawn for, so level updates only move the orb. */
+let voiceScreenKey = "";
+
 function renderVoice(): void {
+  renderDictationBar();
+  renderVoiceScreen();
+}
+
+/** Dictation stays in the composer: a slim bar with the level and a check to type what was said. */
+function renderDictationBar(): void {
   const bar = document.getElementById("voice-bar") as HTMLElement;
   const toolbar = document.getElementById("toolbar") as HTMLElement;
-  bar.hidden = !voice.active;
-  composer.hidden = voice.active && voice.mode === "conversation";
-  toolbar.classList.toggle("voice-on", voice.active);
-  if (!voice.active) {
+  const dictating = voice.mode === "dictation" && (voice.active || voice.phase === "error");
+  bar.hidden = !dictating;
+  toolbar.classList.toggle("voice-on", dictating && voice.active);
+  if (!dictating) {
     bar.innerHTML = "";
     renderToolbar();
     return;
   }
   const phase =
     voice.phase === "connecting"
-      ? "Connecting…"
+      ? "Starting the microphone…"
       : voice.phase === "listening"
-        ? voice.mode === "dictation" ? "Listening… speak, then stop to type it" : "Listening…"
+        ? "Listening… press ✓ when you are done"
         : voice.phase === "transcribing"
           ? "Writing down what you said…"
-          : voice.phase === "thinking"
-            ? "Thinking…"
-            : voice.phase === "speaking"
-              ? "Speaking · talk to interrupt"
-              : voice.phase === "error"
-                ? (voice.error ?? "Voice stopped")
-                : "";
+          : voice.phase === "error"
+            ? (voice.error ?? "Dictation stopped")
+            : "";
   const bars = Array.from({ length: 5 }, (_, index) => {
     const height = Math.max(0.18, Math.min(1, voice.level * (1.4 - Math.abs(index - 2) * 0.25)));
     return `<span style="transform:scaleY(${height.toFixed(2)})"></span>`;
   }).join("");
-  const where =
-    voice.source === "browser" ? `<span class="voice-source">Microphone in your browser window</span>` : "";
+  const where = voice.source === "browser" ? `<span class="voice-source">Microphone in your browser window</span>` : "";
+  bar.classList.toggle("error", voice.phase === "error");
   bar.innerHTML = `
-    <span class="voice-orb${voice.phase === "speaking" ? " speaking" : ""}" aria-hidden="true">${bars}</span>
-    <span class="voice-text" dir="auto">${escapeHtml(voice.transcript || phase)}${voice.transcript ? `<small>${escapeHtml(phase)}</small>` : ""}${where}</span>
-    ${voice.phase === "speaking" ? `<button class="ghost-button" type="button" data-voice-interrupt>Interrupt</button>` : ""}
-    <button class="voice-stop" type="button" data-voice-stop title="${voice.mode === "dictation" ? "Stop and type it" : "End voice mode"}">${voice.mode === "dictation" ? icons.check : icons.close}</button>`;
+    <span class="voice-orb" aria-hidden="true">${voice.phase === "transcribing" ? sparkle("Writing", 14) : bars}</span>
+    <span class="voice-text" dir="auto">${escapeHtml(phase)}${where}</span>
+    ${voice.active ? `<button class="voice-stop" type="button" data-voice-stop title="Stop and type it">${icons.check}</button>` : ""}`;
+  renderToolbar();
+}
+
+/** Voice mode: the whole panel becomes a conversation with Ditfa, like Ditfa's own voice mode. */
+function renderVoiceScreen(): void {
+  const host = document.getElementById("voice-mode") as HTMLElement;
+  if (voiceSetup !== null && state.header.voice.conversation) {
+    // Signed in or a key was added while the screen was open: start talking right away.
+    voiceSetup = null;
+    voiceIo.unlock();
+    vscode.postMessage({ type: "voiceStart", mode: "conversation" });
+  }
+  const conversing = voice.mode === "conversation" && (voice.active || voice.phase === "error");
+  const open = conversing || voiceSetup !== null;
+  host.hidden = !open;
+  root.classList.toggle("voice-open", open);
+  if (!open) {
+    host.innerHTML = "";
+    voiceScreenKey = "";
+    return;
+  }
+  host.style.setProperty("--level", (voice.muted ? 0 : Math.min(1, voice.level * 1.6)).toFixed(3));
+
+  const key = `${voiceSetup ?? ""}|${voice.phase}|${voice.muted}|${voice.transcript}|${voice.answer}|${voice.error ?? ""}|${voice.backend ?? ""}`;
+  if (key === voiceScreenKey) {
+    return;
+  }
+  voiceScreenKey = key;
+
+  if (voiceSetup !== null) {
+    const signedIn = state.header.ditfa.signedIn;
+    host.innerHTML = `
+      <div class="vm-top"><span class="vm-badge">Voice mode</span></div>
+      <div class="vm-center">
+        <div class="vm-ring"><button class="vm-orb idle" type="button" aria-hidden="true" tabindex="-1"></button></div>
+        <p class="vm-status">Talk with Ditfa</p>
+        <p class="vm-note">${escapeHtml(voiceSetup)}</p>
+        <div class="vm-setup">
+          ${signedIn ? (state.header.voice.upgradeUrl ? `<button class="vm-pill primary" type="button" data-open-upgrade>${icons.sparkles}<span>Upgrade for voice</span></button>` : "") : `<button class="vm-pill primary" type="button" data-sign-in>${icons.sparkles}<span>Sign in with Ditfa</span></button>`}
+          <button class="vm-pill" type="button" data-voice-add-key>${icons.key}<span>Use my OpenAI key</span></button>
+        </div>
+      </div>
+      <div class="vm-controls"><button class="vm-close" type="button" data-voice-close aria-label="Close">${icons.close}</button></div>`;
+    return;
+  }
+
+  const status =
+    voice.phase === "connecting"
+      ? "Connecting…"
+      : voice.muted
+        ? "Microphone off"
+        : voice.phase === "listening"
+          ? "Listening…"
+          : voice.phase === "transcribing"
+            ? "Got it…"
+            : voice.phase === "thinking"
+              ? "Thinking…"
+              : voice.phase === "speaking"
+                ? "Speaking"
+                : voice.phase === "error"
+                  ? "Voice stopped"
+                  : "";
+  const hint =
+    voice.phase === "error"
+      ? (voice.error ?? "")
+      : voice.phase === "speaking"
+        ? "Talk or tap the circle to interrupt"
+        : voice.source === "browser"
+          ? "Your microphone is in a browser window. Keep it open while you talk."
+          : "";
+  host.innerHTML = `
+    <div class="vm-top"><span class="vm-badge">Voice mode${voice.backend ? ` · ${escapeHtml(voice.backend)}` : ""}</span></div>
+    <div class="vm-center">
+      <div class="vm-ring"><button class="vm-orb ${token(voice.phase)}${voice.muted ? " muted" : ""}" type="button" data-voice-orb
+        aria-label="${voice.phase === "speaking" ? "Interrupt" : status}"></button></div>
+      <p class="vm-status" role="status">${escapeHtml(status)}</p>
+      ${hint ? `<p class="vm-note${voice.phase === "error" ? " error" : ""}">${escapeHtml(hint)}</p>` : ""}
+      ${voice.transcript ? `<p class="vm-line you" dir="auto"><span>You</span>${escapeHtml(voice.transcript)}</p>` : ""}
+      ${voice.answer ? `<p class="vm-line ditfa" dir="auto"><span>Ditfa</span>${escapeHtml(voice.answer)}</p>` : ""}
+    </div>
+    <div class="vm-controls">
+      <button class="vm-mic${voice.muted ? " off" : ""}" type="button" data-voice-mute aria-pressed="${voice.muted}"
+        aria-label="${voice.muted ? "Turn the microphone on" : "Mute the microphone"}">${voice.muted ? icons.micOff : icons.mic}</button>
+      <button class="vm-close" type="button" data-voice-close aria-label="End voice mode">${icons.close}</button>
+    </div>`;
 }
 
 function startVoice(mode: "dictation" | "conversation"): void {
   const available = mode === "dictation" ? state.header.voice.dictation : state.header.voice.conversation;
   if (!available) {
-    if (state.header.voice.upgradeUrl) {
-      vscode.postMessage({ type: "openUpgrade" });
-    } else if (!state.header.ditfa.signedIn) {
-      vscode.postMessage({ type: "signIn" });
+    if (mode === "conversation") {
+      // Voice mode opens anyway and says what it needs, with the way to set it up right there.
+      voiceSetup = state.header.voice.reason ?? "Sign in to Ditfa, or add an OpenAI API key, to talk with Ditfa.";
+      renderVoice();
+      return;
     }
+    // Dictation says why in the composer's bar.
+    voice = { ...voice, mode: "dictation", phase: "error", active: false, error: state.header.voice.reason ?? "Dictation needs Ditfa or an OpenAI key." };
+    renderVoice();
+    window.setTimeout(() => {
+      if (!voice.active && voice.phase === "error") {
+        voice = { ...voice, phase: "idle", mode: null, error: null };
+        renderVoice();
+      }
+    }, 6000);
     return;
   }
+  voiceSetup = null;
   voiceIo.unlock();
   vscode.postMessage({ type: "voiceStart", mode });
 }

@@ -27,6 +27,7 @@ export const icons = {
   more: icon('<circle cx="3.5" cy="8" r=".6" fill="currentColor"/><circle cx="8" cy="8" r=".6" fill="currentColor"/><circle cx="12.5" cy="8" r=".6" fill="currentColor"/>'),
   send: icon('<path d="M8 13V3M3.5 7.5 8 3l4.5 4.5"/>'),
   stop: '<svg class="icon" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="3.5" width="9" height="9" rx="2" fill="currentColor"/></svg>',
+  micOff: icon('<path d="M2.5 2.5l11 11M6 4.2A2 2 0 0 1 10 4v3.6M10 9.6A2 2 0 0 1 6 9.5V7"/><path d="M3.5 7.5a4.5 4.5 0 0 0 7.6 3.3M12.5 7.5a4.4 4.4 0 0 1-.3 1.6M8 12v2"/>'),
   sliders: icon('<path d="M2.5 4.5h6M11.5 4.5h2M2.5 11.5h2M7.5 11.5h6"/><circle cx="10" cy="4.5" r="1.5"/><circle cx="6" cy="11.5" r="1.5"/>'),
   clip: icon('<path d="M13 7.6 8 12.6a3.2 3.2 0 0 1-4.6-4.6l5.3-5.3a2.1 2.1 0 0 1 3 3L6.5 10.9a1.1 1.1 0 0 1-1.5-1.5l4.6-4.6"/>'),
   slash: icon('<path d="M10.5 2.5 5.5 13.5"/>'),

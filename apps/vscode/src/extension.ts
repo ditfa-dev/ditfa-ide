@@ -39,7 +39,7 @@ export function activate(context: vscode.ExtensionContext): void {
   );
 
   const voice = new VoiceService({
-    cloud: controller.ditfa.cloud,
+    backend: () => controller.voiceBackend(),
     logger,
     post: (message) => view.postToView(message),
     insert: (text) => view.insertIntoComposer(text),

@@ -50,3 +50,4 @@ export {
 } from "./voice";
 export { readSse, streamChat, type LlmEndpoint, type LlmMessage, type LlmRequest, type LlmResult } from "./llm";
 export { DitfaCloud, type DitfaCloudOptions } from "./client";
+export { OPENAI_VOICES, ditfaSpeech, openAiSpeech, type SpeechBackend, type SpokenAudio } from "./speech";

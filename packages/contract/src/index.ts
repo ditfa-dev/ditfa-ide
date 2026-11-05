@@ -340,6 +340,8 @@ export interface VoiceAvailability {
   reason: string | null;
   /** Set when the plan is what stands in the way, so the tooltip can link to upgrading. */
   upgradeUrl: string | null;
+  /** What voice runs on: "Ditfa" (the plan) or "OpenAI" (the user's key); null when nothing is set up. */
+  backend: string | null;
 }
 
 /** A message typed while a turn runs, waiting to be sent when it ends. */
@@ -362,6 +364,12 @@ export interface VoiceView {
   error: string | null;
   /** Where the microphone is: this panel, a system recorder, or a small browser window. */
   source: "panel" | "system" | "browser" | null;
+  /** What Ditfa said last in voice mode, shown under the orb. */
+  answer: string;
+  /** Voice mode's microphone is muted. */
+  muted: boolean;
+  /** "Ditfa" or "OpenAI": what this session runs on. */
+  backend: string | null;
 }
 
 export interface InstallProgress {
@@ -615,6 +623,8 @@ export type WebviewMessage =
   | { type: "planAction"; action: "download" | "save" | "implement"; entryId: string }
   | { type: "voiceStart"; mode: "dictation" | "conversation" }
   | { type: "voiceStop" }
+  /** Voice mode's mute button: audio is dropped while muted, the conversation stays open. */
+  | { type: "voiceMute"; muted: boolean }
   /** Barge-in: stop speaking and listen. */
   | { type: "voiceInterrupt" }
   /** 16 kHz little-endian PCM16 mono from the panel's microphone, base64. */
