@@ -1,5 +1,5 @@
-import { pickLeader } from "./capabilities";
-import { StopTable, type TableEngine } from "./engine";
+import { MAX_TOKENS, StopTable, type TableEngine } from "./engine";
+import { leaderFor, writeFinal } from "./final";
 import { extractJson, isRecord } from "./json";
 import { assignSubtasks, bestFor, validatePlan } from "./plan";
 import { executePrompt, integratePrompt, planPrompt, reviewPrompt, revisePrompt } from "./prompts";
@@ -15,15 +15,22 @@ export async function runTeam(engine: TableEngine): Promise<void> {
   const { state } = engine;
 
   engine.setPhase("plan");
-  const prompt = planPrompt(state.motion);
-  const planText = await withLeader(engine, (leader) =>
-    engine.call(leader, {
+  const prompt = planPrompt(engine.nonce, state.motion, engine.options.context);
+  let planText: string | null = null;
+  // A leader that drops out hands the plan to the next strongest.
+  for (let leader = leaderFor(engine); leader && planText === null && !engine.budgetEnded; leader = leaderFor(engine)) {
+    const reply = await engine.call(leader, {
       system: prompt.system,
       messages: [{ role: "user", content: prompt.user }],
       responseFormat: "json",
       task: "Plan",
-    }),
-  );
+      maxTokens: MAX_TOKENS.plan,
+    });
+    planText = reply?.text ?? null;
+    if (reply === null && engine.isActive(leader)) {
+      break;
+    }
+  }
   const subtasks = validatePlan(planText ?? "", state.motion);
   state.subtasks = subtasks.map((subtask) => ({
     subtask,
@@ -81,23 +88,28 @@ async function runSubtask(engine: TableEngine, entry: SubtaskState): Promise<voi
     const depEntry = state.subtasks.find((item) => item.subtask.id === dep);
     return { title: depEntry?.subtask.title ?? dep, result: depEntry?.result ?? null };
   });
-  const prompt = executePrompt(engine.nonce, state.motion, entry.subtask, inputs);
+  const prompt = executePrompt(engine.nonce, state.motion, entry.subtask, inputs, engine.options.context);
 
   entry.status = "running";
+  const tried = new Set<string>();
   // A failed assignee hands the subtask to the best of those left, once.
   for (let attempt = 0; attempt < 2 && entry.result === null && !engine.budgetEnded; attempt += 1) {
-    const assignee = pickAssignee(engine, entry);
+    const assignee = pickAssignee(engine, entry, tried);
     if (!assignee) {
       break;
     }
     entry.assigneeId = assignee;
-    const text = await engine.call(assignee, {
+    const reply = await engine.call(assignee, {
       system: prompt.system,
       messages: [{ role: "user", content: prompt.user }],
       task: entry.subtask.title,
+      maxTokens: MAX_TOKENS.work,
     });
-    if (text !== null && text.trim() !== "") {
-      entry.result = text.trim();
+    if (reply !== null && reply.text.trim() !== "") {
+      entry.result = reply.text.trim();
+    } else if (reply !== null) {
+      // An empty answer is not work: the next attempt goes to someone else.
+      tried.add(assignee);
     }
   }
   if (entry.result === null) {
@@ -120,16 +132,17 @@ async function review(engine: TableEngine, entry: SubtaskState): Promise<void> {
 
   entry.status = "reviewing";
   const prompt = reviewPrompt(engine.nonce, state.motion, entry.subtask, entry.result);
-  const text = await engine.call(reviewer.id, {
+  const reply = await engine.call(reviewer.id, {
     system: prompt.system,
     messages: [{ role: "user", content: prompt.user }],
     responseFormat: "json",
     task: `Review: ${entry.subtask.title}`,
+    maxTokens: MAX_TOKENS.review,
   });
-  if (text === null) {
+  if (reply === null) {
     return;
   }
-  const note = parseReview(text, reviewer.id);
+  const note = parseReview(reply.text, reviewer.id);
   entry.review = note;
   engine.emit({ type: "reviewCompleted", subtaskId: entry.subtask.id, review: note });
   if (note.verdict !== "revise" || engine.budgetEnded) {
@@ -143,9 +156,10 @@ async function review(engine: TableEngine, entry: SubtaskState): Promise<void> {
     system: revise.system,
     messages: [{ role: "user", content: revise.user }],
     task: `Revise: ${entry.subtask.title}`,
+    maxTokens: MAX_TOKENS.work,
   });
-  if (revised !== null && revised.trim() !== "") {
-    entry.result = revised.trim();
+  if (revised !== null && revised.text.trim() !== "") {
+    entry.result = revised.text.trim();
     entry.revised = true;
   }
 }
@@ -168,58 +182,38 @@ async function integrate(engine: TableEngine): Promise<void> {
   const { state } = engine;
   engine.setPhase("integrate");
   const parts = state.subtasks.map((entry) => ({ title: entry.subtask.title, result: entry.result }));
-  const prompt = integratePrompt(engine.nonce, state.motion, parts);
+  const prompt = integratePrompt(engine.nonce, state.motion, parts, engine.options.context);
 
-  const text = engine.budgetEnded
-    ? null
-    : await withLeader(engine, (leader) =>
-        engine.call(leader, {
-          system: prompt.system,
-          messages: [{ role: "user", content: prompt.user }],
-          task: "Integration",
-          stream: "synthesis",
-        }),
-      );
-  if (text !== null) {
-    state.finalAnswer = text.trim();
+  const written = await writeFinal(
+    engine,
+    { system: prompt.system, messages: [{ role: "user", content: prompt.user }], task: "Integration", maxTokens: MAX_TOKENS.integration },
+    "merged deliverable",
+  );
+  if (written) {
     return;
   }
 
   // Without a merge, the parts in plan order are still the work the team did.
-  state.finalAnswer = state.subtasks
+  const listed = state.subtasks
     .filter((entry) => entry.result !== null)
     .map((entry) => `## ${entry.subtask.title}\n\n${entry.result}`)
     .join("\n\n");
-  state.notices.push(
+  if (listed === "" || state.finalState !== "none") {
+    return;
+  }
+  engine.setFinal(listed, "fallback", null);
+  engine.notice(
     engine.budgetEnded
       ? "The budget ran out before the results were merged; the final answer lists them as they are."
       : "No leader could merge the results; the final answer lists them as they are.",
   );
 }
 
-/** Calls `run` with the leader, re-choosing the leader among those left each time one fails. */
-async function withLeader(engine: TableEngine, run: (leaderId: string) => Promise<string | null>): Promise<string | null> {
-  const { state } = engine;
-  while (!engine.budgetEnded) {
-    if (!state.leaderId || !engine.isActive(state.leaderId)) {
-      state.leaderId = pickLeader(engine.active())?.id ?? null;
-    }
-    if (!state.leaderId) {
-      return null;
-    }
-    const text = await run(state.leaderId);
-    if (text !== null) {
-      return text;
-    }
-  }
-  return null;
-}
-
-function pickAssignee(engine: TableEngine, entry: SubtaskState): string | null {
-  if (entry.assigneeId && engine.isActive(entry.assigneeId)) {
+function pickAssignee(engine: TableEngine, entry: SubtaskState, tried: ReadonlySet<string>): string | null {
+  if (entry.assigneeId && engine.isActive(entry.assigneeId) && !tried.has(entry.assigneeId)) {
     return entry.assigneeId;
   }
-  return bestFor(entry.subtask.skills, engine.active())?.id ?? null;
+  return bestFor(entry.subtask.skills, engine.active().filter((participant) => !tried.has(participant.id)))?.id ?? null;
 }
 
 function requireTeam(engine: TableEngine): void {

@@ -106,8 +106,8 @@ describe("review mode", () => {
   it("aggregates the rankings with Borda and reveals identities only in the report", async () => {
     const runner = fakeRunner(
       reviewReply({
-        // Everyone puts the last letter on offer first.
-        rank: (request) => JSON.stringify({ ranking: [...offeredLetters(request)].reverse() }),
+        // Everyone puts the latest letter on offer first.
+        rank: (request) => JSON.stringify({ ranking: [...offeredLetters(request)].sort().reverse() }),
       }),
     );
     const state = await runRoundTable({ motion, mode: "review", participants: seats(), runner, seed: "fixed" });
@@ -129,7 +129,8 @@ describe("review mode", () => {
     const runner = fakeRunner(
       reviewReply({
         propose: (request) => {
-          if (request.participant.id === "seat-beta") throw new Error("HTTP 500 from provider");
+          // A 401 is not worth a retry: the participant leaves at once.
+          if (request.participant.id === "seat-beta") throw Object.assign(new Error("Invalid API key"), { status: 401 });
           return "Proposal: fine";
         },
       }),
@@ -140,7 +141,7 @@ describe("review mode", () => {
     expect(state.proposals.map((proposal) => proposal.participantId)).toEqual(["seat-alpha", "seat-gamma"]);
     expect(events).toContainEqual(expect.objectContaining({ type: "participantFailed", participantId: "seat-beta" }));
     expect(runner.requests.filter((request) => request.participant.id === "seat-beta")).toHaveLength(1);
-    expect(renderReport(state)).toContain("failed: HTTP 500 from provider");
+    expect(renderReport(state)).toContain("failed: Invalid API key");
   });
 
   it("ends when fewer than two participants are left", async () => {
@@ -155,6 +156,8 @@ describe("review mode", () => {
     const state = await runRoundTable({ motion, mode: "review", participants: seats(), runner });
     expect(state.endedBy).toBe("insufficientParticipants");
     expect(state.status).toBe("completed");
+    // The one proposal there is still stands, labelled as a stand-in.
+    expect(state).toMatchObject({ finalAnswer: "Proposal: alone", finalState: "fallback", finalBy: "seat-alpha" });
   });
 
   it("hands the synthesis to the next leader when the leader fails", async () => {
@@ -169,8 +172,135 @@ describe("review mode", () => {
     );
     // Opus is pinned so the leader is known.
     participants[0] = { ...participants[0]!, pinnedRole: "leader" };
-    const state = await runRoundTable({ motion, mode: "review", participants, runner });
+    const events: TableEvent[] = [];
+    const state = await runRoundTable({ motion, mode: "review", participants, runner, onEvent: (event) => events.push(event) });
     expect(state.finalAnswer).toBe("Synthesis by the deputy");
     expect(state.leaderId).not.toBe("seat-alpha");
+    expect(state).toMatchObject({ finalState: "complete", finalBy: state.leaderId });
+    expect(events).toContainEqual({
+      type: "leaderChanged",
+      leaderId: state.leaderId,
+      previousId: "seat-alpha",
+      reason: "The leader dropped out: overloaded",
+    });
+    // Each attempt announces itself, so a half-streamed first attempt can be cleared.
+    expect(events.filter((event) => event.type === "synthesisStarted")).toHaveLength(2);
+  });
+
+  it("assigns letters before anyone proposes", async () => {
+    const events: TableEvent[] = [];
+    await runRoundTable({ motion, mode: "review", participants: seats(), runner: fakeRunner(reviewReply()), onEvent: (event) => events.push(event) });
+    const labels = events.findIndex((event) => event.type === "labelsAssigned");
+    const firstCall = events.findIndex((event) => event.type === "participantStarted");
+    expect(labels).toBeGreaterThan(-1);
+    expect(labels).toBeLessThan(firstCall);
+  });
+
+  it("shows each reviewer the others in a different order", async () => {
+    const runner = fakeRunner(reviewReply());
+    await runRoundTable({ motion, mode: "review", participants: seats(), runner, nonce: NONCE });
+    const firsts = runner.requests
+      .filter((request) => stepOf(request) === "critique")
+      .map((request) => /The other proposals:\n<untrusted-\w+ source="proposal ([A-Z])"/.exec(prompt(request))?.[1]);
+    expect(new Set(firsts).size).toBe(3);
+  });
+
+  it("reads a JSON critique and adopts a real revision", async () => {
+    let revised = false;
+    const runner = fakeRunner(
+      reviewReply({
+        critique: () => {
+          if (revised) return JSON.stringify({ critique: "ok", changed: false, revised_proposal: null });
+          revised = true;
+          return JSON.stringify({ critique: "B is right.", changed: true, revised_proposal: "Cache it, keyed by the file hash." });
+        },
+      }),
+    );
+    const state = await runRoundTable({ motion, mode: "review", participants: seats(), runner, maxRounds: 1 });
+    expect(state.proposals.filter((proposal) => proposal.text === "Cache it, keyed by the file hash.")).toHaveLength(1);
+    expect(state.critiques.filter((critique) => critique.revised)).toHaveLength(1);
+  });
+
+  it("keeps the proposal of a participant that leaves later", async () => {
+    const runner = fakeRunner(
+      reviewReply({
+        critique: (request) => {
+          if (request.participant.id === "seat-beta") throw new Error("Bad request");
+          return JSON.stringify({ critique: "ok", changed: false, revised_proposal: null });
+        },
+      }),
+    );
+    const state = await runRoundTable({ motion, mode: "review", participants: seats(), runner });
+    const beta = state.proposals.find((proposal) => proposal.participantId === "seat-beta");
+    expect(beta).toBeDefined();
+    const synthesis = runner.requests.find((request) => stepOf(request) === "synthesize");
+    expect(synthesis && prompt(synthesis)).toContain(beta?.text);
+    // Ranking needs three proposals, and the departed one still counts: two rankers rank it.
+    expect(state.scores.map((score) => score.participantId)).toContain("seat-beta");
+  });
+
+  it("skips the ranking with only two proposals and says so", async () => {
+    const runner = fakeRunner(reviewReply());
+    const state = await runRoundTable({ motion, mode: "review", participants: seats().slice(0, 2), runner });
+    expect(runner.requests.some((request) => stepOf(request) === "rank")).toBe(false);
+    expect(state.scores).toEqual([]);
+    expect(state.notices).toContain("The peer ranking was skipped: it needs at least three proposals.");
+    expect(state.finalState).toBe("complete");
+  });
+
+  it("hands over when the leader writes an empty synthesis", async () => {
+    const participants = seats();
+    participants[0] = { ...participants[0]!, pinnedRole: "leader" };
+    const events: TableEvent[] = [];
+    const runner = fakeRunner(
+      reviewReply({ synthesize: (request) => (request.participant.id === "seat-alpha" ? "  \n " : "The real synthesis") }),
+    );
+    const state = await runRoundTable({ motion, mode: "review", participants, runner, onEvent: (event) => events.push(event) });
+    expect(state).toMatchObject({ finalAnswer: "The real synthesis", finalState: "complete" });
+    expect(state.finalBy).not.toBe("seat-alpha");
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "leaderChanged", previousId: "seat-alpha", reason: "The leader returned an empty answer." }),
+    );
+    // Writing nothing is not a failure: alpha keeps its seat.
+    expect(state.participants.find((entry) => entry.participant.id === "seat-alpha")?.status).toBe("done");
+  });
+
+  it("falls back to the best-ranked proposal whose author is still seated", async () => {
+    let labels: Record<string, string> = {};
+    const runner = fakeRunner(
+      reviewReply({
+        rank: (request) => JSON.stringify({ ranking: [...offeredLetters(request)].sort().reverse() }),
+        synthesize: (request) => {
+          // C is ranked best but drops out; everyone else writes nothing.
+          if (labels[request.participant.id] === "C") throw new Error("Bad request");
+          return "";
+        },
+      }),
+    );
+    const state = await runRoundTable({
+      motion,
+      mode: "review",
+      participants: seats(),
+      runner,
+      seed: "fixed",
+      onEvent: (event) => {
+        if (event.type === "labelsAssigned") labels = event.labels;
+      },
+    });
+    const b = Object.keys(labels).find((id) => labels[id] === "B");
+    expect(state.finalState).toBe("fallback");
+    expect(state.finalBy).toBe(b);
+    expect(state.finalAnswer).toBe(state.proposals.find((proposal) => proposal.participantId === b)?.text);
+    expect(state.notices).toContain("No leader could write the synthesis; the final answer is the best-ranked proposal as written.");
+    expect(renderReport(state)).toContain("Stand-in");
+  });
+
+  it("marks a synthesis cut off by the length limit as partial", async () => {
+    const runner = fakeRunner(
+      reviewReply({ synthesize: () => ({ text: "The table agrees that", finishReason: "length" }) }),
+    );
+    const state = await runRoundTable({ motion, mode: "review", participants: seats(), runner });
+    expect(state).toMatchObject({ finalAnswer: "The table agrees that", finalState: "partial" });
+    expect(state.notices).toContain("The synthesis hit the length limit, so it is cut off.");
   });
 });

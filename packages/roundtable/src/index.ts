@@ -7,6 +7,9 @@
  * - `team` mode is collaboration: the leader plans subtasks, each goes to the
  *   model whose capabilities fit it best, runs in dependency order, is reviewed
  *   by another model, and the leader merges the results.
+ * - `code` mode is a panel review of working changes: each model reviews the
+ *   diffs blind, findings that point at the same defect are merged, the
+ *   others vote on each one anonymously, and the leader writes a verdict.
  *
  * The phases are decided by code. Model calls are injected through
  * `ModelRunner`, progress leaves through `onEvent`, and the result is text: the
@@ -19,9 +22,15 @@ export type {
   Budget,
   CapabilityKey,
   CapabilityProfile,
+  ChangedFile,
   ChatMessage,
+  CodePhase,
   Critique,
   EndReason,
+  FinalState,
+  Finding,
+  FindingSeverity,
+  FindingVote,
   ModelRef,
   ModelRunner,
   Participant,
@@ -51,3 +60,5 @@ export type { RoundTable } from "./table";
 export { createRoundTable, runRoundTable } from "./table";
 export { capabilitiesFor, overallScore, pickLeader } from "./capabilities";
 export { renderReport } from "./report";
+export { fence, randomNonce } from "./fence";
+export { isTransient, MAX_TOKENS } from "./engine";

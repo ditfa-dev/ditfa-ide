@@ -10,7 +10,7 @@ import {
 } from "@ditfa-ide/contract/settings";
 import { icons } from "@ditfa-ide/webview/icons";
 import { escapeHtml } from "@ditfa-ide/webview/markdown";
-import { seatColor, seatInitials, tableDiagram, type Seat } from "@ditfa-ide/webview/roundtableView";
+import { seatColor, seatInitials } from "@ditfa-ide/webview/roundtableView";
 import {
   aria,
   button,
@@ -433,10 +433,21 @@ export function roundtableGroups(ctx: ViewContext): Group[] {
 interface Candidate {
   id: string;
   label: string;
-  /** Provider id, for grouping and the seat's subtitle. */
+  /** Provider id, for its column and the colour key. */
   provider: string;
+  /** What it is good at, from its capabilities. */
+  strengths: string[];
   /** "Requires Pro", for a model the plan cannot use. */
   lock: string | null;
+}
+
+function strengths(capabilities: SettingsSnapshot["models"][number]["capabilities"]): string[] {
+  const list: string[] = [];
+  if (capabilities.reasoning) list.push("Reasoning");
+  if (capabilities.tools) list.push("Tools");
+  if (capabilities.vision) list.push("Images");
+  if (capabilities.contextWindow) list.push(`${Math.round(capabilities.contextWindow / 1000).toLocaleString("en-US")}k context`);
+  return list;
 }
 
 /** Chat models, once per id, plus any participant that has since dropped out of the list, so it can be removed. */
@@ -446,13 +457,19 @@ function candidates(snapshot: SettingsSnapshot): Candidate[] {
   for (const model of snapshot.models) {
     if (model.usableFor.includes("chat") && !seen.has(model.id)) {
       seen.add(model.id);
-      list.push({ id: model.id, label: model.label, provider: model.provider, lock: model.locked ? lockLabel(model) : null });
+      list.push({
+        id: model.id,
+        label: model.label,
+        provider: model.provider,
+        strengths: strengths(model.capabilities),
+        lock: model.locked ? lockLabel(model) : null,
+      });
     }
   }
   for (const id of snapshot.roundtable.participants) {
     if (!seen.has(id)) {
       seen.add(id);
-      list.push({ id, label: id, provider: "", lock: null });
+      list.push({ id, label: id, provider: "", strengths: [], lock: null });
     }
   }
   return list;
@@ -476,7 +493,11 @@ function seatedLeader(snapshot: SettingsSnapshot): string | null {
   return fallback && participants.includes(fallback) ? fallback : null;
 }
 
-/** The table itself: who sits at it, with the leader crowned, and every model that can join, a click away. */
+/**
+ * Who sits at the table, as a list of models like the editor's own Language Models view: one row per model with
+ * its provider and strengths, the leader marked, and a switch to seat it. Rows keep their place when switched, so
+ * the list never jumps under the pointer.
+ */
 function participantsRow(ctx: ViewContext): Row {
   const id = "roundtable-participants";
   const chosen = ctx.snapshot.roundtable.participants;
@@ -484,8 +505,8 @@ function participantsRow(ctx: ViewContext): Row {
     label: "At the table",
     description:
       chosen.length < 2
-        ? "Seat at least two models. Click a model below to seat it; click a seat to free it."
-        : `${chosen.length} of up to ${MAX_ROUNDTABLE_PARTICIPANTS} seats taken. Click a seat to free it.`,
+        ? `Seat at least two models for a review. Up to ${MAX_ROUNDTABLE_PARTICIPANTS} can take part.`
+        : `${chosen.length} of up to ${MAX_ROUNDTABLE_PARTICIPANTS} seated.`,
     keywords: "models round table participants seats",
   };
   const field = fieldFor(ctx, id, "roundtable.participants", copy);
@@ -493,45 +514,24 @@ function participantsRow(ctx: ViewContext): Row {
   const list = candidates(ctx.snapshot);
   const leader = seatedLeader(ctx.snapshot);
 
-  const seats: Seat[] = chosen.map((modelId) => {
-    const candidate = list.find((item) => item.id === modelId);
-    return {
-      key: `${candidate?.provider ?? ""}:${modelId}`,
-      name: candidate?.label ?? modelId,
-      detail: providerName(ctx.snapshot, candidate?.provider ?? ""),
-      leader: modelId === leader,
-      attrs: data({ "participant-remove": modelId }),
-      label: `Free the seat of ${candidate?.label ?? modelId}`,
-    };
-  });
-  const mode = ctx.snapshot.roundtable.defaultMode;
-  const diagram = tableDiagram(seats, {
-    title: mode === "review" ? "Review" : "Team",
-    subtitle: chosen.length ? `${chosen.length} seated` : "No one seated yet",
-    minSeats: 4,
-    size: "large",
-  });
-
-  const groups = new Map<string, Candidate[]>();
-  for (const candidate of list) {
-    groups.set(candidate.provider, [...(groups.get(candidate.provider) ?? []), candidate]);
-  }
-  const picks = [...groups.entries()]
-    .map(([provider, members]) => {
-      const chips = members
-        .map((candidate, index) => {
-          const checked = chosen.includes(candidate.id);
-          const disabled = !checked && (candidate.lock !== null || full);
-          return (
-            `<label class="pick seat-pick${checked ? " on" : ""}${disabled ? " off" : ""}" style="--seat:${seatColor(`${candidate.provider}:${candidate.id}`)}">` +
-            `<input type="checkbox"${data({ participant: candidate.id, focus: `${id}-${provider}-${index}` })}` +
-            `${checked ? " checked" : ""}${disabled ? " disabled" : ""} />` +
-            `<span class="seat-pick-avatar">${esc(seatInitials(candidate.label))}</span><span>${esc(candidate.label)}</span>` +
-            `${candidate.lock ? `${settingsIcons.lock}<span class="sr-only"> (${esc(candidate.lock)})</span>` : ""}</label>`
-          );
-        })
-        .join("");
-      return `<div class="pick-group"><div class="pick-group-title">${esc(providerName(ctx.snapshot, provider))}</div><div class="picks">${chips}</div></div>`;
+  const rows = list
+    .map((candidate, index) => {
+      const seated = chosen.includes(candidate.id);
+      const disabled = !seated && (candidate.lock !== null || full);
+      const nameId = `${id}-name-${index}`;
+      const chips = candidate.strengths.map((strength) => `<span class="roster-chip">${esc(strength)}</span>`).join("");
+      return (
+        `<tr class="${seated ? "on" : ""}${disabled ? " off" : ""}" style="--seat:${seatColor(`${candidate.provider}:${candidate.id}`)}">` +
+        `<td class="roster-model-cell"><div class="roster-model"><span class="roster-avatar" aria-hidden="true">${esc(seatInitials(candidate.label))}</span>` +
+        `<span class="roster-name" id="${nameId}">${esc(candidate.label)}</span>` +
+        `${candidate.id === leader ? '<span class="roster-leader">Leader</span>' : ""}</div></td>` +
+        `<td class="roster-provider">${esc(providerName(ctx.snapshot, candidate.provider))}` +
+        `${candidate.lock ? `<span class="roster-lock">${settingsIcons.lock}${esc(candidate.lock)}</span>` : ""}</td>` +
+        `<td class="roster-strengths-cell"><div class="roster-strengths">${chips || '<span class="muted">—</span>'}</div></td>` +
+        `<td class="roster-seat"><input type="checkbox" role="switch" class="switch"` +
+        `${data({ participant: candidate.id, focus: `${id}-${index}` })} aria-labelledby="${nameId}"` +
+        `${seated ? " checked" : ""}${disabled ? " disabled" : ""} /></td></tr>`
+      );
     })
     .join("");
 
@@ -539,10 +539,13 @@ function participantsRow(ctx: ViewContext): Row {
     `<div class="table-empty"><p>No models to seat yet. Sign in to Ditfa for every model on your plan, or add an API key or a local model in Models.</p>` +
     `<div class="table-empty-actions">${button("Sign in with Ditfa", data({ action: "signIn" }), { variant: "primary", focus: `${id}-sign-in` })}` +
     `${button("Add a key or local model", data({ nav: "models" }), { variant: "secondary", focus: `${id}-models` })}</div></div>`;
-  const control = `<div class="round-table-editor" role="group"${aria(field)}>${diagram}${list.length ? picks : empty}</div>`;
+  const table =
+    `<div class="roster"><table class="roster-table"${aria(field)}>` +
+    `<thead><tr><th scope="col">Model</th><th scope="col">Provider</th><th scope="col">Strengths</th><th scope="col">Seated</th></tr></thead>` +
+    `<tbody>${rows}</tbody></table></div>`;
   return {
     id,
-    html: row(field, control, { stacked: true }),
+    html: row(field, list.length ? table : empty, { stacked: true }),
     search: words(copy, list.map((candidate) => candidate.label).join(" ")),
   };
 }

@@ -1,8 +1,9 @@
 import { pickLeader } from "./capabilities";
+import { MIN_PANEL, runCode } from "./code";
 import { StopTable, TableEngine } from "./engine";
 import { runReview } from "./review";
 import { runTeam } from "./team";
-import type { TableOptions, TableState } from "./types";
+import type { SubtaskStatus, TableMode, TableOptions, TableState } from "./types";
 
 export interface RoundTable {
   readonly id: string;
@@ -51,6 +52,9 @@ async function runToEnd(engine: TableEngine): Promise<TableState> {
     }
     ids.add(participant.id);
   }
+  if (state.mode === "code" && !options.changes?.files.length) {
+    throw new Error("Code mode needs the changes to review.");
+  }
 
   state.leaderId = pickLeader(options.participants)?.id ?? null;
   engine.emit({
@@ -63,10 +67,10 @@ async function runToEnd(engine: TableEngine): Promise<TableState> {
 
   try {
     engine.throwIfAborted();
-    if (options.participants.length < (state.mode === "review" ? 2 : 1)) {
+    if (options.participants.length < MIN_SEATS[state.mode]) {
       throw new StopTable("insufficientParticipants");
     }
-    await (state.mode === "review" ? runReview(engine) : runTeam(engine));
+    await RUN[state.mode](engine);
     engine.throwIfAborted();
     state.endedBy = engine.budgetEnded ? "budget" : "completed";
   } catch (error) {
@@ -76,14 +80,35 @@ async function runToEnd(engine: TableEngine): Promise<TableState> {
     state.endedBy = error.reason;
   }
 
-  state.status = state.endedBy === "aborted" ? "aborted" : "completed";
+  const aborted = state.endedBy === "aborted";
+  state.status = aborted ? "aborted" : "completed";
   state.phase = "done";
   state.endedAt = Date.now();
   for (const entry of state.participants) {
-    if (entry.status !== "failed") {
+    // Stopped participants keep saying so; on an abort, so does anyone whose call had not settled yet.
+    if (entry.status === "running" && aborted) {
+      entry.status = "stopped";
+    } else if (entry.status !== "failed" && entry.status !== "stopped") {
       entry.status = "done";
     }
   }
-  engine.emit({ type: "tableCompleted", endedBy: state.endedBy, finalAnswer: state.finalAnswer });
+  if (aborted) {
+    for (const entry of state.subtasks) {
+      if (UNFINISHED.has(entry.status)) {
+        entry.status = "stopped";
+      }
+    }
+  }
+  engine.emit({
+    type: "tableCompleted",
+    endedBy: state.endedBy,
+    finalAnswer: state.finalAnswer,
+    finalState: state.finalState,
+    finalBy: state.finalBy,
+  });
   return structuredClone(state);
 }
+
+const MIN_SEATS: Record<TableMode, number> = { review: 2, team: 1, code: MIN_PANEL };
+const RUN: Record<TableMode, (engine: TableEngine) => Promise<void>> = { review: runReview, team: runTeam, code: runCode };
+const UNFINISHED = new Set<SubtaskStatus>(["pending", "running", "reviewing", "revising"]);

@@ -124,6 +124,10 @@ export class ThreadSession implements vscode.Disposable {
     private readonly store: TranscriptStore,
   ) {}
 
+  hasEntry(id: string): boolean {
+    return this.entries.has(id);
+  }
+
   get threadId(): string | null {
     return this.context?.threadId ?? null;
   }
@@ -157,7 +161,9 @@ export class ThreadSession implements vscode.Disposable {
     cwd: string | undefined,
     config: Record<string, JsonValue> | null = null,
   ): Promise<ThreadContext> {
-    this.reset();
+    // A round table run in a blank chat belongs to the thread its first message creates: it must not vanish
+    // the moment that message (often "Implement") is sent.
+    this.reset(this.orderedEntries().filter((entry) => entry.kind === "roundtable"));
     const response = await this.client.request("thread/start", {
       cwd: cwd ?? null,
       model: settings.model || null,
@@ -166,7 +172,11 @@ export class ThreadSession implements vscode.Disposable {
       sandbox: settings.sandboxMode,
       config,
     });
-    return this.adoptThread(response);
+    const context = this.adoptThread(response);
+    if (this.entries.size > 0) {
+      void this.persist();
+    }
+    return context;
   }
 
   async resume(
@@ -682,9 +692,12 @@ export class ThreadSession implements vscode.Disposable {
     this.contextEmitter.fire(this.context);
   }
 
-  private reset(): void {
+  private reset(keep: ChatEntry[] = []): void {
     this.entryOrder.length = 0;
     this.entries.clear();
+    for (const entry of keep) {
+      this.insert(entry);
+    }
     this.plan = [];
     this.planExplanation = null;
     this.tokenUsage = null;

@@ -251,6 +251,84 @@ describe("ThreadSession", () => {
     expect(entries().map((entry) => entry.id)).toEqual(["c1", "m2"]);
   });
 
+  const table = (id: string, at: number, status: "running" | "completed"): ChatEntry => ({
+    id,
+    kind: "roundtable",
+    at,
+    turnId: null,
+    mode: "review",
+    motion: "Which cache should we use?",
+    status,
+    phase: status === "running" ? "Answers" : "Done",
+    phases: [{ key: "propose", label: "Answers", state: status === "running" ? "active" : "done" }],
+    lanes: [
+      {
+        participantId: "p1",
+        letter: "A",
+        label: "A",
+        model: "M",
+        provider: "x",
+        ref: "x:m",
+        isLeader: true,
+        status: status === "running" ? "thinking" : "done",
+        task: "Proposal",
+        text: "Red",
+        error: null,
+        outputTokens: 3,
+        messages: [{ id: "c1", phase: "Answers", task: "Proposal", text: "Red", status: status === "running" ? "streaming" : "done" }],
+      },
+    ],
+    subtasks: [],
+    rankings: [],
+    final: "",
+    finalState: "none",
+    finalBy: null,
+    scope: null,
+    findings: [],
+    notices: [],
+    error: null,
+    revealed: false,
+    usage: { outputTokens: 3, estimated: false },
+    endedBy: null,
+    report: null,
+    startedAt: at,
+    endedAt: null,
+  });
+
+  it("keeps a round table from a blank chat when its first message creates the thread", async () => {
+    session.clear();
+    session.upsertHostEntry(table("rt1", 5, "completed"), true);
+    await session.start(options.settings, "/w");
+    expect(entries().map((entry) => entry.id)).toEqual(["rt1"]);
+    expect(store.save).toHaveBeenCalled();
+  });
+
+  it("brings round tables back on resume, in place, and settles one cut off by a reload", async () => {
+    const message: ChatEntry = { id: "u1", kind: "assistant", at: 1000, turnId: "turn1", text: "hi" } as ChatEntry;
+    store.load.mockResolvedValueOnce({
+      entries: [message, table("rt-old", 1500, "completed"), table("rt-live", 2500, "running")],
+      plan: [],
+      planExplanation: null,
+      tokenUsage: null,
+    });
+    request.mockResolvedValueOnce({
+      ...threadResponse,
+      thread: {
+        ...threadResponse.thread,
+        turns: [
+          { id: "turn1", items: [], startedAt: 1 },
+          { id: "turn2", startedAt: 2, items: [{ type: "agentMessage", id: "m2", text: "later", phase: null }] },
+        ],
+      },
+    });
+    await session.resume(THREAD, options.settings, "/w");
+    expect(entries().map((entry) => entry.id)).toEqual(["u1", "rt-old", "m2", "rt-live"]);
+    const live = entries().find((entry) => entry.id === "rt-live");
+    expect(live?.kind === "roundtable" && live.status).toBe("stopped");
+    expect(live?.kind === "roundtable" && live.lanes[0]?.status).toBe("stopped");
+    expect(live?.kind === "roundtable" && live.lanes[0]?.messages[0]?.status).toBe("stopped");
+  });
+
   describe("undone hunks", () => {
     const patch = (status: string) => ({
       type: "fileChange",
