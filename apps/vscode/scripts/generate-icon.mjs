@@ -1,13 +1,13 @@
 /**
- * Builds media/icon.png, the 256x256 marketplace tile, from the brand mark in
- * media/ditfa.png.
+ * Builds media/icon.png, the 256x256 marketplace tile, from the Ditfa app icon in
+ * media/app-icon.png (a copy of apps/desktop/src-tauri/icons/icon.png in the Ditfa
+ * repository), so the extension shows the same icon as the Ditfa apps.
  *
- * The source art is a large transparent PNG with generous empty margins, which
- * would render as a tiny logo in a 256px tile. This trims to the actual ink,
- * downsamples with a box filter, and composites the result onto a solid black
- * square, so the tile looks identical on light and dark marketplace themes.
+ * The app icon is a rounded tile inside transparent margins, which would render as
+ * a small tile in the marketplaces. This trims the margins, then downsamples the
+ * tile with a box filter in premultiplied alpha, keeping its own rounded corners.
  *
- * Run after changing the brand mark:  node scripts/generate-icon.mjs
+ * Run after changing the app icon:  node scripts/generate-icon.mjs
  */
 import { deflateSync, inflateSync } from "node:zlib";
 import { readFileSync, writeFileSync } from "node:fs";
@@ -15,70 +15,21 @@ import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
-const SOURCE = resolve(HERE, "../media/ditfa.png");
+const SOURCE = resolve(HERE, "../media/app-icon.png");
 const TARGET = resolve(HERE, "../media/icon.png");
 
 const SIZE = 256;
-/** Fraction of the tile the mark occupies, leaving optical breathing room. */
-const MARK_SCALE = 0.7;
-/** Solid black, edge to edge — no rounding, no transparency. */
-const PLATE = [0, 0, 0];
 
 function main() {
   const source = decodePng(readFileSync(SOURCE));
   const trimmed = trimToInk(source);
-  const square = padToSquare(trimmed);
-  const marked = Math.round(SIZE * MARK_SCALE);
-  const mark = downsample(square, marked);
-
-  const canvas = { width: SIZE, height: SIZE, data: Buffer.alloc(SIZE * SIZE * 4) };
-  paintPlate(canvas);
-  compositeCentered(canvas, mark);
+  const canvas = downsample(padToSquare(trimmed), SIZE);
 
   writeFileSync(TARGET, encodePng(canvas));
   console.log(
     `[generate-icon] ${source.width}x${source.height} -> trimmed ${trimmed.width}x${trimmed.height} -> ${SIZE}x${SIZE}`,
   );
 }
-
-// ------------------------------------------------------------------ painting
-
-function paintPlate(canvas) {
-  for (let offset = 0; offset < canvas.data.length; offset += 4) {
-    canvas.data[offset] = PLATE[0];
-    canvas.data[offset + 1] = PLATE[1];
-    canvas.data[offset + 2] = PLATE[2];
-    canvas.data[offset + 3] = 255;
-  }
-}
-
-function compositeCentered(canvas, mark) {
-  const originX = Math.round((canvas.width - mark.width) / 2);
-  const originY = Math.round((canvas.height - mark.height) / 2);
-
-  for (let y = 0; y < mark.height; y += 1) {
-    for (let x = 0; x < mark.width; x += 1) {
-      const src = (y * mark.width + x) * 4;
-      const alpha = mark.data[src + 3] / 255;
-      if (alpha === 0) {
-        continue;
-      }
-      const canvasX = originX + x;
-      const canvasY = originY + y;
-      if (canvasX < 0 || canvasY < 0 || canvasX >= canvas.width || canvasY >= canvas.height) {
-        continue;
-      }
-      const dst = (canvasY * canvas.width + canvasX) * 4;
-      for (let channel = 0; channel < 3; channel += 1) {
-        canvas.data[dst + channel] = Math.round(
-          mark.data[src + channel] * alpha + canvas.data[dst + channel] * (1 - alpha),
-        );
-      }
-      canvas.data[dst + 3] = Math.max(canvas.data[dst + 3], mark.data[src + 3]);
-    }
-  }
-}
-
 
 // ------------------------------------------------------------ image geometry
 

@@ -1,6 +1,6 @@
 {
   "name": "@ditfa-ide/webview",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "The Ditfa Code chat panel.",
   "license": "Apache-2.0",

@@ -3,6 +3,12 @@
 All notable changes to the Ditfa Code extension are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.5.1] — 2026-11-05
+
+### Changed
+
+- The extension uses the Ditfa app icon in the VS Code Marketplace, Open VSX, and the editor.
+
 ## [0.5.0] — 2026-11-03
 
 Ditfa Code now lives in its own repository, [ditfa-dev/ditfa-ide](https://github.com/ditfa-dev/ditfa-ide), split into packages under `@ditfa-ide/*`.

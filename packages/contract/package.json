@@ -1,6 +1,6 @@
 {
   "name": "@ditfa-ide/contract",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "The message contract between the Ditfa Code panel and the extension host.",
   "license": "Apache-2.0",
