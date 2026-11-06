@@ -31,7 +31,9 @@ export interface DeviceBridgeOptions {
 
 /** The current `ditfa.terminalAccess`; anything unexpected is `off`. */
 export function readTerminalAccess(): TerminalAccess {
-  const value = vscode.workspace.getConfiguration("ditfa").get<string>("terminalAccess", "off");
+  // Only the user's own settings count: a project's settings file must never be able to switch this on.
+  const inspected = vscode.workspace.getConfiguration("ditfa").inspect<string>(ACCESS_SETTING);
+  const value = inspected?.globalValue;
   return value === "ask" || value === "allow" ? value : "off";
 }
 
