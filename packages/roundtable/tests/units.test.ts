@@ -99,6 +99,10 @@ describe("labels", () => {
     );
     // Only whole names: a longer word that merely contains one is left alone.
     expect(redactIdentities("seat-10 and xgpt-6", seatsHere)).toBe("seat-10 and xgpt-6");
+    // A name the motion asks about stays: it is the subject, not a signature.
+    expect(redactIdentities("GPT-6 is cheaper than GPT-6 mini.", seatsHere, "GPT-6 or Opus for X?")).toBe(
+      "GPT-6 is cheaper than [a model].",
+    );
   });
 
   it("go past Z", () => {
@@ -114,8 +118,12 @@ describe("parseRanking", () => {
     expect(parseRanking('["proposal a", "c"]', ["A", "C"])).toEqual(["A", "C"]);
   });
 
-  it("falls back to letters in the order they appear", () => {
+  it("falls back to letters in ranking positions, in the order they appear", () => {
     expect(parseRanking("1. C is best\n2. A is weaker", ["A", "C"])).toEqual(["C", "A"]);
+    expect(parseRanking("C > A", ["A", "C"])).toEqual(["C", "A"]);
+    expect(parseRanking("Proposal C beats proposal A.", ["A", "C"])).toEqual(["C", "A"]);
+    // The article "A" is not a vote for A.
+    expect(parseRanking("A clear winner is C, then B", ["A", "B", "C"])).toBeNull();
   });
 
   it("drops the ranker's own label, invented labels and repeats, and rejects an empty result", () => {
@@ -222,6 +230,44 @@ describe("assignSubtasks", () => {
 });
 
 describe("parsers", () => {
+  it("reads the JSON critique, trusting changed: false", () => {
+    expect(parseCritique('{"critique": "B is vague.", "changed": true, "revised_proposal": "Use a cache."}', "old")).toEqual({
+      critique: "B is vague.",
+      revision: "Use a cache.",
+    });
+    expect(parseCritique('```json\n{"critique": "fine", "changed": false, "revised_proposal": "Use a cache."}\n```', "old")).toEqual({
+      critique: "fine",
+      revision: null,
+    });
+    expect(parseCritique('{"critique": "fine", "changed": true, "revised_proposal": null}', "old").revision).toBeNull();
+    // Whitespace alone does not make a revision.
+    expect(parseCritique('{"critique": "fine", "changed": true, "revised_proposal": "Use  a\ncache."}', "Use a cache.").revision).toBeNull();
+  });
+
+  it("never turns a no-change reply into the proposal, and keeps its explanation with the critique", () => {
+    const old = "Cache the parsed config in memory, keyed by the file's mtime, and drop it when the file changes on disk.";
+    for (const reply of [
+      'NO CHANGE. My "minimum useful" paragraph already covers C\'s point.',
+      "No changes.",
+      "`NO CHANGE`",
+      "Unchanged: see above.",
+      "Same as before, plus a note on mtime.",
+    ]) {
+      expect(parseCritique(`## Critique\nC is thin.\n## Revised proposal\n${reply}`, old).revision).toBeNull();
+      expect(parseCritique(JSON.stringify({ critique: "C is thin.", changed: true, revised_proposal: reply }), old).revision).toBeNull();
+    }
+    const kept = parseCritique('## Critique\nC is thin.\n## Revised proposal\nNO CHANGE. My "minimum useful" paragraph covers it.', old);
+    expect(kept.critique).toBe('C is thin.\n\nMy "minimum useful" paragraph covers it.');
+  });
+
+  it("finds the revision under a bold or decorated heading", () => {
+    expect(parseCritique("**Critique**\nB is vague.\n**Revised proposal**\nUse B's cache.", "old")).toEqual({
+      critique: "B is vague.",
+      revision: "Use B's cache.",
+    });
+    expect(parseCritique("## Critique\nok\n### Revised proposal (A)\nA new plan entirely.", "old").revision).toBe("A new plan entirely.");
+  });
+
   it("tells a real revision from NO CHANGE", () => {
     expect(parseCritique("## Critique\nB is vague.\n## Revised proposal\nNO CHANGE", "x").revision).toBeNull();
     expect(parseCritique("## Critique\nB is vague.\n## Revised proposal\n**NO CHANGE.**", "x").revision).toBeNull();

@@ -71,6 +71,8 @@ describe("updates", () => {
       ["roundtable.maxRounds", 10],
       ["features.chat", { modelId: "deepseek-chat", provider: "deepseek" }],
       ["features.video", { modelId: null, provider: null }],
+      ["mcp.terminalAccess", "allow"],
+      ["mcp.terminalAccess", "off"],
     ];
     for (const [key, value] of cases) {
       expect(update(key, value), key).toEqual({ ok: true, message: { type: "update", key, value } });
@@ -78,7 +80,7 @@ describe("updates", () => {
   });
 
   it("refuses keys it does not know, including names every object has", () => {
-    for (const key of ["agent.unknown", "voice.voices", "agent", "__proto__", "constructor", "toString", 7, null]) {
+    for (const key of ["agent.unknown", "voice.voices", "mcp.servers", "mcp.terminalBridge", "agent", "__proto__", "constructor", "toString", 7, null]) {
       expectRefused(update(key, true), String(key));
     }
   });
@@ -88,6 +90,8 @@ describe("updates", () => {
       ["agent.allowNetwork", "true"],
       ["agent.allowNetwork", 1],
       ["agent.permission", "root"],
+      ["mcp.terminalAccess", "always"],
+      ["mcp.terminalAccess", true],
       ["agent.defaultMode", undefined],
       ["agent.maxTokensPerTurn", -1],
       ["agent.maxTokensPerTurn", 10_000_001],

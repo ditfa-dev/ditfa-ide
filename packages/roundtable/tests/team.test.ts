@@ -61,7 +61,8 @@ describe("team mode", () => {
 
     expect(state.finalAnswer).toBe("Merged deliverable");
     expect(events.filter((event) => event.type === "subtaskAssigned")).toHaveLength(2);
-    expect(events).toContainEqual({ type: "synthesisDelta", participantId: "lead", text: "Merged deliverable" });
+    expect(events).toContainEqual(expect.objectContaining({ type: "synthesisDelta", participantId: "lead", text: "Merged deliverable" }));
+    expect(state).toMatchObject({ finalState: "complete", finalBy: "lead" });
 
     const report = renderReport(state);
     expect(report).toContain("### code: Implement the flag");

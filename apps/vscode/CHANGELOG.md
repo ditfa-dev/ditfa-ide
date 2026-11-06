@@ -3,6 +3,32 @@
 All notable changes to the Ditfa Code extension are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.7.0] — 2026-11-05
+
+### Added
+
+- **Terminal access for Ditfa.** Ditfa in the web app, the desktop app and Ditfa Code's own agent can list your editor's terminals, read what ran in them (commands, exit codes, output) and, if you allow it, run commands in a terminal you can see. Turn it on in Settings → MCP & tools → Terminal access: **Ask before running commands** shows each command, why it is wanted and who asks before anything runs; **Read and run without asking** skips the question. Off by default, uses your Ditfa sign-in, and never runs commands in Restricted Mode.
+- Output Ditfa reads has escape codes removed and obvious secrets (API keys, tokens, passwords, private keys) hidden before it leaves the editor.
+- A status bar entry shows whether terminal access is connected.
+- **Panel Review.** Every model you seat reviews your uncommitted changes on its own, each reading the files in its own order. They then vote anonymously on each other's findings, so you see only what holds up: each finding has its severity, file and line, and a Unanimous, Majority, Single reviewer or Disputed badge. **Fix with agent** and **Fix all confirmed** hand the confirmed findings to the agent, which changes code through its usual approvals. It never sends lock files, build output, binaries or the target of a symbolic link, and it runs only in a trusted workspace.
+
+### Changed
+
+- **The round table is a team view now.** The big table diagram is gone. Each run is one card: the request, a step rail (Answers → Critique → Ranking → Verdict, Plan → Assign → Build & review → Integrate, or Find → Vote → Summary), the answer first, then one row per model. Open a row to read everything that model wrote, step by step. Review mode shows the peer ranking, and Team mode a task list.
+- Settings → Round table lists models in a table (model, provider, strengths, leader, seated) instead of the diagram.
+- Every panel and settings page fits widths from about 170 px up, plus short windows.
+- Models keep their letter after the reveal ("B · GPT-5"), so the verdict's references still make sense.
+- Implement and Fix use Agent mode for that one message without changing your chosen mode. What the models wrote goes to the agent as material to check, not as instructions.
+
+### Fixed
+
+- **Stop works on the first click**, even while the models stream. It says "Stopping…" at once, and every model still working ends as Stopped. Esc and the composer's Stop button stop the newest table too.
+- A round table card no longer vanishes when the chat's first message (often Implement) is sent. It comes back after a reload, stays in the conversation it started in, and a table cut off by a reload shows as stopped.
+- A "no change" critique no longer replaces a model's proposal. A failed or empty answer from the leader hands over to the next model instead of showing half an answer, and two leaders' texts are never joined.
+- Busy (429) and server (5xx) errors are retried. A model that is thinking quietly is no longer taken for a stuck one. OpenAI reasoning models get the parameters they accept.
+- A request too short to work on, or too few reachable models, is refused before anything starts, and what you typed stays in the sheet.
+- Saved reports no longer overwrite each other.
+
 ## [0.6.0] — 2026-11-05
 
 ### Added

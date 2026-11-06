@@ -2,6 +2,7 @@ import { randomNonce } from "./fence";
 import type {
   ChatMessage,
   EndReason,
+  FinalState,
   Participant,
   ParticipantState,
   Phase,
@@ -12,8 +13,31 @@ import type {
 } from "./types";
 
 const DEFAULT_CONCURRENCY = 4;
-const DEFAULT_TIMEOUT_MS = 180_000;
-const DEFAULT_MAX_TOKENS = 4096;
+const DEFAULT_TIMEOUT_MS = 600_000;
+const DEFAULT_INACTIVITY_MS = 90_000;
+const DEFAULT_RETRY_DELAY_MS = 1_000;
+/** Attempts per call: the first plus two retries of a transient failure. */
+const MAX_ATTEMPTS = 3;
+/** A server asking for a longer wait than this is not worth waiting for inside a table. */
+const MAX_RETRY_AFTER_MS = 20_000;
+
+/**
+ * Output caps per kind of call. Proposals, critiques (which carry a revised proposal) and final texts need room;
+ * rankings and votes are short JSON. Reasoning models spend hidden tokens from the same cap, so none is tiny.
+ */
+export const MAX_TOKENS = {
+  proposal: 4_096,
+  critique: 4_096,
+  ranking: 1_024,
+  synthesis: 8_192,
+  plan: 2_048,
+  work: 6_144,
+  review: 1_024,
+  integration: 12_000,
+  findings: 6_144,
+  votes: 2_048,
+  verdict: 3_072,
+} as const;
 
 /** Thrown to end the table early; the runner turns it into `endedBy`. */
 export class StopTable extends Error {
@@ -29,14 +53,47 @@ export interface CallRequest {
   responseFormat?: "text" | "json";
   /** What the lane shows while the call runs, such as "Proposal" or a subtask title. */
   task: string;
-  /** Synthesis text streams as `synthesisDelta`, everything else as `participantDelta`. */
+  /** Final text streams as `synthesisDelta` after a `synthesisStarted`, everything else as `participantDelta`. */
   stream?: "lane" | "synthesis";
+  maxTokens: number;
+}
+
+export interface CallReply {
+  text: string;
+  /** The model hit its token cap: the text is cut off. */
+  truncated: boolean;
+}
+
+/** HTTP statuses worth a second try: timeouts, rate limits and server-side trouble. */
+function transientStatus(status: number): boolean {
+  return status === 408 || status === 425 || status === 429 || (status >= 500 && status < 600);
+}
+
+const NETWORK_ERROR = /ECONNRESET|ETIMEDOUT|EPIPE|EAI_AGAIN|UND_ERR|socket hang up|network|fetch failed|terminated|other side closed|Timed out after/i;
+
+/** True for failures that a retry a moment later is likely to fix. */
+export function isTransient(error: unknown): boolean {
+  if (typeof error !== "object" || error === null) {
+    return false;
+  }
+  const { status, message, cause } = error as { status?: unknown; message?: unknown; cause?: unknown };
+  if (typeof status === "number") {
+    return transientStatus(status);
+  }
+  if (typeof message === "string" && NETWORK_ERROR.test(message)) {
+    return true;
+  }
+  const code = typeof cause === "object" && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  return typeof code === "string" && NETWORK_ERROR.test(code);
+}
+
+function seconds(ms: number): string {
+  return ms >= 1000 ? `${Math.round(ms / 1000)} s` : `${ms} ms`;
 }
 
 /**
- * The machinery both modes share: one place where model calls start, so the
- * abort signal, timeouts, the concurrency limit and the budget are enforced
- * the same way for every call, and usage is counted exactly once.
+ * The machinery every mode shares: one place where model calls start, so the abort signal, timeouts, retries, the
+ * concurrency limit and the budget are enforced the same way for every call, and usage is counted exactly once.
  */
 export class TableEngine {
   readonly state: TableState;
@@ -46,6 +103,7 @@ export class TableEngine {
   private readonly concurrency: number;
   private readonly waiting: (() => void)[] = [];
   private running = 0;
+  private calls = 0;
   private readonly inFlight = new Map<string, number>();
   private budgetReported = false;
   private readonly onExternalAbort = () => this.abort();
@@ -81,6 +139,10 @@ export class TableEngine {
       subtasks: [],
       assignments: [],
       finalAnswer: null,
+      finalState: "none",
+      finalBy: null,
+      scope: options.changes?.label ?? null,
+      findings: [],
       notices: [],
       startedAt: Date.now(),
       endedAt: null,
@@ -124,17 +186,46 @@ export class TableEngine {
     this.emit({ type: "phaseStarted", phase, round });
   }
 
+  /** Records something the user should know, for the card and the report alike. */
+  notice(text: string): void {
+    this.state.notices.push(text);
+    this.emit({ type: "notice", text });
+  }
+
+  /** Hands the lead to `leaderId`, announcing it when it changes. */
+  setLeader(leaderId: string, reason: string): void {
+    const previousId = this.state.leaderId;
+    if (previousId === leaderId) {
+      return;
+    }
+    this.state.leaderId = leaderId;
+    this.emit({ type: "leaderChanged", leaderId, previousId, reason });
+  }
+
+  /** Sets the final text and who it is from, in one place so the three fields never disagree. */
+  setFinal(text: string | null, finalState: FinalState, finalBy: string | null): void {
+    this.state.finalAnswer = text;
+    this.state.finalState = text === null ? "none" : finalState;
+    this.state.finalBy = text === null ? null : finalBy;
+  }
+
   /** Participants that have not failed, in the order they were seated. */
   active(): Participant[] {
     return this.state.participants.filter((entry) => entry.status !== "failed").map((entry) => entry.participant);
   }
 
   isActive(id: string): boolean {
-    return this.entry(id)?.status !== "failed";
+    const status = this.entry(id)?.status;
+    return status !== undefined && status !== "failed";
   }
 
   participant(id: string): Participant | null {
     return this.entry(id)?.participant ?? null;
+  }
+
+  /** Seating order, so lists built from parallel calls read the same on every run. */
+  seatOf(id: string): number {
+    return this.state.participants.findIndex((entry) => entry.participant.id === id);
   }
 
   get outputTokens(): number {
@@ -167,11 +258,11 @@ export class TableEngine {
   }
 
   /**
-   * Runs one model call for `participantId`. Resolves with the text, or null
-   * when the budget is spent or the participant failed (it is then reported
-   * and leaves the table). Throws `StopTable` once the table is aborted.
+   * Runs one model call for `participantId`, retrying transient failures. Resolves with the reply, or null when the
+   * budget is spent or the participant failed (it is then reported and leaves the table). Throws `StopTable` once
+   * the table is aborted.
    */
-  async call(participantId: string, request: CallRequest): Promise<string | null> {
+  async call(participantId: string, request: CallRequest): Promise<CallReply | null> {
     const entry = this.entry(participantId);
     if (!entry || entry.status === "failed") {
       return null;
@@ -179,40 +270,71 @@ export class TableEngine {
     this.throwIfAborted();
     await this.acquire();
     try {
-      this.throwIfAborted();
-      if (this.checkBudget() || !this.isActive(entry.participant.id)) {
-        return null;
+      for (let attempt = 1; ; attempt += 1) {
+        this.throwIfAborted();
+        if (this.checkBudget() || !this.isActive(participantId)) {
+          return null;
+        }
+        const outcome = await this.attempt(entry, request, attempt);
+        if (outcome.kind !== "retry") {
+          return outcome.reply;
+        }
+        await this.sleep(outcome.delayMs);
       }
-      return await this.runOne(entry, request);
     } finally {
       this.release();
     }
   }
 
-  private async runOne(entry: ParticipantState, request: CallRequest): Promise<string | null> {
+  private async attempt(
+    entry: ParticipantState,
+    request: CallRequest,
+    attempt: number,
+  ): Promise<{ kind: "done"; reply: CallReply | null } | { kind: "retry"; delayMs: number }> {
     const participant = entry.participant;
     const phase = this.state.phase;
+    this.calls += 1;
+    const callId = `c${this.calls}`;
     this.markRunning(entry, 1);
-    this.emit({ type: "participantStarted", participantId: participant.id, phase, task: request.task });
+    if (request.stream === "synthesis") {
+      this.emit({ type: "synthesisStarted", participantId: participant.id, callId });
+    }
+    this.emit({ type: "participantStarted", participantId: participant.id, callId, phase, task: request.task });
 
     const timeoutMs = this.options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    const inactivityMs = this.options.inactivityMs ?? DEFAULT_INACTIVITY_MS;
     const callController = new AbortController();
     const onAbort = () => callController.abort();
     this.signal.addEventListener("abort", onAbort, { once: true });
-    let timedOut = false;
-    const timer = setTimeout(() => {
-      timedOut = true;
+    let failure: "timeout" | "stalled" | null = null;
+    const hardCap = setTimeout(() => {
+      failure = "timeout";
       callController.abort();
     }, timeoutMs);
+    let idle: ReturnType<typeof setTimeout> | undefined;
+    const watch = () => {
+      clearTimeout(idle);
+      idle = setTimeout(() => {
+        failure ??= "stalled";
+        callController.abort();
+      }, inactivityMs);
+    };
+    watch();
 
+    let streamed = "";
     const onDelta = (text: string) => {
-      if (callController.signal.aborted || text === "") {
+      if (callController.signal.aborted) {
         return;
       }
+      watch();
+      if (text === "") {
+        return;
+      }
+      streamed += text;
       this.emit(
         request.stream === "synthesis"
-          ? { type: "synthesisDelta", participantId: participant.id, text }
-          : { type: "participantDelta", participantId: participant.id, phase, text },
+          ? { type: "synthesisDelta", participantId: participant.id, callId, text }
+          : { type: "participantDelta", participantId: participant.id, callId, phase, text },
       );
     };
 
@@ -228,7 +350,7 @@ export class TableEngine {
             participant,
             system: request.system,
             messages: request.messages,
-            maxTokens: this.options.maxTokensPerCall ?? DEFAULT_MAX_TOKENS,
+            maxTokens: this.options.maxTokensPerCall ?? request.maxTokens,
             ...(participant.temperature !== undefined ? { temperature: participant.temperature } : {}),
             ...(request.responseFormat ? { responseFormat: request.responseFormat } : {}),
           },
@@ -241,29 +363,68 @@ export class TableEngine {
       if (callController.signal.aborted) {
         throw new Error("aborted");
       }
+      const truncated = result.finishReason === "length";
       this.record(entry, request, result.text, result.usage);
       this.markRunning(entry, -1);
-      this.emit({ type: "participantCompleted", participantId: participant.id, phase, text: result.text });
+      this.emit({ type: "participantCompleted", participantId: participant.id, callId, phase, text: result.text, truncated });
       this.checkBudget();
-      return result.text;
+      return { kind: "done", reply: { text: result.text, truncated } };
     } catch (error) {
       this.markRunning(entry, -1);
       if (this.signal.aborted) {
+        this.stopRunning(entry, request, streamed);
         throw new StopTable("aborted");
       }
-      const message = timedOut
-        ? `Timed out after ${timeoutMs >= 1000 ? `${Math.round(timeoutMs / 1000)} s` : `${timeoutMs} ms`}.`
-        : error instanceof Error
-          ? error.message
-          : String(error);
+      const message =
+        failure === "timeout"
+          ? `Timed out after ${seconds(timeoutMs)}.`
+          : failure === "stalled"
+            ? `Stalled: nothing arrived for ${seconds(inactivityMs)}.`
+            : error instanceof Error
+              ? error.message
+              : String(error);
+      // The hard cap is already generous: a call that ran into it would only run into it again.
+      const retry = attempt < MAX_ATTEMPTS && failure !== "timeout" && (failure === "stalled" || isTransient(error));
+      this.emit({ type: "participantFailed", participantId: participant.id, callId, phase, error: message, willRetry: retry });
+      if (retry) {
+        const base = (this.options.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS) * (attempt === 1 ? 1 : 3);
+        return { kind: "retry", delayMs: retryDelay(error, base) };
+      }
       entry.status = "failed";
       entry.error = message;
-      this.emit({ type: "participantFailed", participantId: participant.id, phase, error: message });
-      return null;
+      return { kind: "done", reply: null };
     } finally {
-      clearTimeout(timer);
+      clearTimeout(hardCap);
+      clearTimeout(idle);
       this.signal.removeEventListener("abort", onAbort);
     }
+  }
+
+  /** A call cut off by Stop: its participant reads as stopped, and a final text in progress is kept as partial. */
+  private stopRunning(entry: ParticipantState, request: CallRequest, streamed: string): void {
+    if (entry.status !== "failed") {
+      entry.status = "stopped";
+    }
+    if (request.stream === "synthesis" && streamed.trim() !== "" && this.state.finalState === "none") {
+      this.setFinal(streamed.trim(), "partial", entry.participant.id);
+      this.notice("The table was stopped while the final answer was being written, so it is cut off.");
+    }
+  }
+
+  /** Waits between retries, but never past an abort. */
+  private sleep(ms: number): Promise<void> {
+    if (ms <= 0 || this.signal.aborted) {
+      return Promise.resolve();
+    }
+    return new Promise((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.signal.removeEventListener("abort", done);
+        resolve();
+      };
+      const timer = setTimeout(done, ms);
+      this.signal.addEventListener("abort", done, { once: true });
+    });
   }
 
   private record(entry: ParticipantState, request: CallRequest, text: string, usage: Usage | undefined): void {
@@ -306,7 +467,7 @@ export class TableEngine {
     const count = (this.inFlight.get(id) ?? 0) + change;
     this.inFlight.set(id, count);
     // Calls cut off by an abort settle after the table has closed; they must not undo its final statuses.
-    if (entry.status !== "failed" && this.state.phase !== "done") {
+    if (entry.status !== "failed" && entry.status !== "stopped" && this.state.phase !== "done") {
       entry.status = count > 0 ? "running" : "idle";
     }
   }
@@ -326,4 +487,13 @@ export class TableEngine {
   private entry(id: string): ParticipantState | undefined {
     return this.state.participants.find((entry) => entry.participant.id === id);
   }
+}
+
+/** The server's Retry-After when it sent a sensible one, otherwise the base delay with some jitter. */
+function retryDelay(error: unknown, base: number): number {
+  const after = typeof error === "object" && error !== null ? (error as { retryAfterMs?: unknown }).retryAfterMs : undefined;
+  if (typeof after === "number" && Number.isFinite(after) && after >= 0) {
+    return Math.min(after, MAX_RETRY_AFTER_MS);
+  }
+  return base * (0.75 + Math.random() * 0.5);
 }

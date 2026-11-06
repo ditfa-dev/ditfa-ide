@@ -134,6 +134,7 @@ const CHECKS: { [K in SettingKey]: Check<SettingValue<K>> } = {
   "features.speech": featureModel("speech"),
   "features.transcription": featureModel("transcription"),
   "features.voiceMode": featureModel("voiceMode"),
+  "mcp.terminalAccess": oneOf("off", "ask", "allow"),
 };
 
 export function isSettingKey(value: unknown): value is SettingKey {

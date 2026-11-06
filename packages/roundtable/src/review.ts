@@ -1,48 +1,52 @@
-import { pickLeader } from "./capabilities";
-import { StopTable, type TableEngine } from "./engine";
+import { MAX_TOKENS, StopTable, type TableEngine } from "./engine";
+import { writeFinal } from "./final";
 import { assignLabels, redactIdentities } from "./labels";
-import { critiquePrompt, parseCritique, proposePrompt, rankPrompt, synthesisPrompt } from "./prompts";
+import { critiquePrompt, parseCritique, proposePrompt, rankPrompt, rotate, synthesisPrompt } from "./prompts";
 import { bordaCount, parseRanking } from "./ranking";
-import type { Participant, Proposal, Ranking } from "./types";
+import type { Proposal, Ranking } from "./types";
 
-/** Below this, there is nobody left to deliberate with. */
-const MIN_REVIEWERS = 2;
+/** Below this, there is nothing to deliberate about. */
+const MIN_PROPOSALS = 2;
+/** With two proposals each ranker sees one, and a ranking of one says nothing. */
+const MIN_RANKED = 3;
 const DEFAULT_ROUNDS = 2;
 
 /**
- * Review mode: blind proposals, anonymous critique rounds that stop as soon as
- * nobody revises, a peer ranking, and a synthesis by the leader. Which phase
- * comes next is decided here, never by a model.
+ * Review mode: blind proposals, anonymous critique rounds that stop as soon as nobody revises, a peer ranking, and
+ * a synthesis by the leader. Which phase comes next is decided here, never by a model. A participant that drops out
+ * stops being asked, but what it already wrote stays on the table.
  */
 export async function runReview(engine: TableEngine): Promise<void> {
-  const { state } = engine;
+  const { state, options } = engine;
 
-  engine.setPhase("propose");
-  const prompt = proposePrompt(state.motion);
-  await Promise.all(
-    engine.active().map(async (participant) => {
-      const text = await engine.call(participant.id, {
-        system: prompt.system,
-        messages: [{ role: "user", content: prompt.user }],
-        task: "Proposal",
-      });
-      if (text !== null && text.trim() !== "") {
-        state.proposals.push({ participantId: participant.id, text: text.trim(), revisions: 0 });
-      }
-    }),
-  );
-  // Seating order, not finishing order, so the state reads the same on every run.
-  const seat = new Map(state.participants.map((entry, index) => [entry.participant.id, index]));
-  state.proposals.sort((a, b) => (seat.get(a.participantId) ?? 0) - (seat.get(b.participantId) ?? 0));
-  requireTable(engine);
-
+  // Letters from the start, so every seat can be told apart while the proposals are still being written.
   state.labels = assignLabels(
-    state.proposals.map((proposal) => proposal.participantId),
+    state.participants.map((entry) => entry.participant.id),
     engine.seed,
   );
   engine.emit({ type: "labelsAssigned", labels: { ...state.labels } });
 
-  const rounds = Math.max(0, Math.floor(engine.options.maxRounds ?? DEFAULT_ROUNDS));
+  engine.setPhase("propose");
+  const prompt = proposePrompt(engine.nonce, state.motion, options.context);
+  await Promise.all(
+    engine.active().map(async (participant) => {
+      const reply = await engine.call(participant.id, {
+        system: prompt.system,
+        messages: [{ role: "user", content: prompt.user }],
+        task: "Proposal",
+        maxTokens: MAX_TOKENS.proposal,
+      });
+      const text = reply?.text.trim() ?? "";
+      if (text !== "") {
+        state.proposals.push({ participantId: participant.id, text, revisions: 0 });
+      }
+    }),
+  );
+  // Seating order, not finishing order, so the state reads the same on every run.
+  state.proposals.sort((a, b) => engine.seatOf(a.participantId) - engine.seatOf(b.participantId));
+  requireTable(engine);
+
+  const rounds = Math.max(0, Math.floor(options.maxRounds ?? DEFAULT_ROUNDS));
   for (let round = 1; round <= rounds && !engine.budgetEnded; round += 1) {
     const revised = await critiqueRound(engine, round);
     requireTable(engine);
@@ -52,8 +56,12 @@ export async function runReview(engine: TableEngine): Promise<void> {
   }
 
   if (!engine.budgetEnded) {
-    await rank(engine);
-    requireTable(engine);
+    if (state.proposals.length >= MIN_RANKED) {
+      await rank(engine);
+      requireTable(engine);
+    } else {
+      engine.notice("The peer ranking was skipped: it needs at least three proposals.");
+    }
   }
   await synthesize(engine);
 }
@@ -63,60 +71,73 @@ async function critiqueRound(engine: TableEngine, round: number): Promise<boolea
   const { state } = engine;
   engine.setPhase("critique", round);
   // Everyone critiques the same snapshot, so who answers first changes nothing.
-  const snapshot = live(engine).map((proposal) => ({ ...proposal }));
+  const snapshot = state.proposals.map((proposal) => ({ ...proposal }));
   let revised = false;
 
   await Promise.all(
-    snapshot.map(async (own) => {
-      const label = state.labels[own.participantId] ?? "?";
-      const others = byLabel(engine, snapshot.filter((proposal) => proposal.participantId !== own.participantId));
-      const prompt = critiquePrompt(engine.nonce, state.motion, round, { label, text: own.text }, others);
-      const text = await engine.call(own.participantId, {
-        system: prompt.system,
-        messages: [{ role: "user", content: prompt.user }],
-        task: `Critique, round ${round}`,
-      });
-      if (text === null) {
-        return;
-      }
-      const { critique, revision } = parseCritique(text, own.text);
-      state.critiques.push({ round, participantId: own.participantId, text: critique, revised: revision !== null });
-      const current = state.proposals.find((proposal) => proposal.participantId === own.participantId);
-      if (revision !== null && current) {
-        current.text = revision;
-        current.revisions += 1;
-        revised = true;
-      }
-    }),
+    snapshot
+      .filter((own) => engine.isActive(own.participantId))
+      .map(async (own) => {
+        const label = labelOf(engine, own.participantId);
+        const others = othersFor(engine, own.participantId, snapshot);
+        const prompt = critiquePrompt(engine.nonce, state.motion, round, { label, text: own.text }, others, engine.options.context);
+        const reply = await engine.call(own.participantId, {
+          system: prompt.system,
+          messages: [{ role: "user", content: prompt.user }],
+          responseFormat: "json",
+          task: `Critique, round ${round}`,
+          maxTokens: MAX_TOKENS.critique,
+        });
+        if (reply === null) {
+          return;
+        }
+        const { critique, revision } = parseCritique(reply.text, own.text);
+        state.critiques.push({ round, participantId: own.participantId, text: critique, revised: revision !== null });
+        const current = state.proposals.find((proposal) => proposal.participantId === own.participantId);
+        if (revision !== null && current) {
+          current.text = revision;
+          current.revisions += 1;
+          revised = true;
+        }
+      }),
   );
+  state.critiques.sort((a, b) => a.round - b.round || engine.seatOf(a.participantId) - engine.seatOf(b.participantId));
   return revised;
 }
 
 async function rank(engine: TableEngine): Promise<void> {
   const { state } = engine;
   engine.setPhase("rank");
-  const proposals = live(engine);
+  const proposals = state.proposals;
   const rankings: Ranking[] = [];
 
   await Promise.all(
-    proposals.map(async (own) => {
-      const others = byLabel(engine, proposals.filter((proposal) => proposal.participantId !== own.participantId));
-      const prompt = rankPrompt(engine.nonce, state.motion, state.labels[own.participantId] ?? "?", others);
-      const text = await engine.call(own.participantId, {
-        system: prompt.system,
-        messages: [{ role: "user", content: prompt.user }],
-        responseFormat: "json",
-        task: "Ranking",
-      });
-      const order = text === null ? null : parseRanking(text, others.map((other) => other.label));
-      if (order) {
-        rankings.push({ participantId: own.participantId, order: order.map((label) => idFor(engine, label)) });
-      }
-    }),
+    proposals
+      .filter((own) => engine.isActive(own.participantId))
+      .map(async (own) => {
+        const others = othersFor(engine, own.participantId, proposals);
+        const prompt = rankPrompt(
+          engine.nonce,
+          state.motion,
+          { label: labelOf(engine, own.participantId), text: masked(engine, own.text) },
+          others,
+          engine.options.context,
+        );
+        const reply = await engine.call(own.participantId, {
+          system: prompt.system,
+          messages: [{ role: "user", content: prompt.user }],
+          responseFormat: "json",
+          task: "Ranking",
+          maxTokens: MAX_TOKENS.ranking,
+        });
+        const order = reply === null ? null : parseRanking(reply.text, others.map((other) => other.label));
+        if (order) {
+          rankings.push({ participantId: own.participantId, order: order.map((label) => idFor(engine, label)) });
+        }
+      }),
   );
 
-  const seat = new Map(state.participants.map((entry, index) => [entry.participant.id, index]));
-  rankings.sort((a, b) => (seat.get(a.participantId) ?? 0) - (seat.get(b.participantId) ?? 0));
+  rankings.sort((a, b) => engine.seatOf(a.participantId) - engine.seatOf(b.participantId));
   state.rankings = rankings;
   state.scores = bordaCount(
     rankings,
@@ -128,87 +149,104 @@ async function rank(engine: TableEngine): Promise<void> {
 async function synthesize(engine: TableEngine): Promise<void> {
   const { state } = engine;
   engine.setPhase("synthesize");
-  const proposals = live(engine);
-  const labelled = byLabel(engine, proposals);
-  const critiques = state.critiques
-    .filter((critique) => engine.isActive(critique.participantId))
-    .map((critique) => ({
-      label: state.labels[critique.participantId] ?? "?",
-      round: critique.round,
-      text: redactIdentities(critique.text, seated(engine)),
-    }));
-  const ranking = state.scores.map((score) => ({ label: state.labels[score.participantId] ?? "?", points: score.points }));
-  const prompt = synthesisPrompt(engine.nonce, state.motion, labelled, critiques, ranking);
+  const labelled = byLabel(engine, state.proposals);
+  const critiques = state.critiques.map((critique) => ({
+    label: labelOf(engine, critique.participantId),
+    round: critique.round,
+    text: masked(engine, critique.text),
+  }));
+  // Every ranked letter has its proposal in the prompt: proposals are never dropped, only their authors.
+  const ranking = state.scores.map((score) => ({ label: labelOf(engine, score.participantId), points: score.points }));
+  const prompt = synthesisPrompt(engine.nonce, state.motion, labelled, critiques, ranking, engine.options.context);
 
-  // A leader that fails hands over to the next strongest, once each, until someone answers.
-  while (!engine.budgetEnded) {
-    const leader = currentLeader(engine);
-    if (!leader) {
-      break;
-    }
-    const text = await engine.call(leader, {
-      system: prompt.system,
-      messages: [{ role: "user", content: prompt.user }],
-      task: "Synthesis",
-      stream: "synthesis",
-    });
-    if (text !== null) {
-      state.finalAnswer = text.trim();
-      return;
-    }
-  }
-
-  // No synthesis: the best-ranked proposal is still the most useful answer the table has.
-  const best = state.scores[0]?.participantId ?? proposals[0]?.participantId;
-  const fallback = proposals.find((proposal) => proposal.participantId === best);
-  state.finalAnswer = fallback?.text ?? null;
-  state.notices.push(
-    engine.budgetEnded
-      ? "The budget ran out before the synthesis; the final answer is the best-ranked proposal as written."
-      : "No leader could write the synthesis; the final answer is the best-ranked proposal as written.",
+  const written = await writeFinal(
+    engine,
+    { system: prompt.system, messages: [{ role: "user", content: prompt.user }], task: "Synthesis", maxTokens: MAX_TOKENS.synthesis },
+    "synthesis",
   );
-}
-
-/** The leader, re-chosen among those still seated when the current one has failed. */
-function currentLeader(engine: TableEngine): string | null {
-  const { state } = engine;
-  if (state.leaderId && engine.isActive(state.leaderId)) {
-    return state.leaderId;
+  if (!written) {
+    fallBack(
+      engine,
+      engine.budgetEnded
+        ? "The budget ran out before the synthesis; the final answer is the best-ranked proposal as written."
+        : "No leader could write the synthesis; the final answer is the best-ranked proposal as written.",
+    );
   }
-  state.leaderId = pickLeader(engine.active())?.id ?? null;
-  return state.leaderId;
-}
-
-/** Proposals whose authors are still at the table. */
-function live(engine: TableEngine): Proposal[] {
-  return engine.state.proposals.filter((proposal) => engine.isActive(proposal.participantId));
 }
 
 /**
- * Sorted by label, so the position of a proposal in a prompt says nothing about
- * its author either, and with every seat's name masked in the text.
+ * The best-ranked proposal stands in for a synthesis nobody could write: preferably one whose author is still
+ * seated, since its latest revision reflects the whole debate.
  */
-function byLabel(engine: TableEngine, proposals: Proposal[]): { label: string; text: string }[] {
-  const everyone = seated(engine);
-  return proposals
-    .map((proposal) => ({
-      label: engine.state.labels[proposal.participantId] ?? "?",
-      text: redactIdentities(proposal.text, everyone),
-    }))
-    .sort((a, b) => (a.label.length - b.label.length) || (a.label < b.label ? -1 : 1));
+function fallBack(engine: TableEngine, notice: string): void {
+  const { state } = engine;
+  const ranked = [
+    ...state.scores.map((score) => score.participantId),
+    ...state.proposals.map((proposal) => proposal.participantId),
+  ];
+  const best =
+    ranked.find((id) => engine.isActive(id) && state.proposals.some((proposal) => proposal.participantId === id)) ??
+    ranked.find((id) => state.proposals.some((proposal) => proposal.participantId === id));
+  const proposal = state.proposals.find((item) => item.participantId === best);
+  if (!proposal || state.finalState !== "none") {
+    return;
+  }
+  engine.setFinal(proposal.text, "fallback", proposal.participantId);
+  engine.notice(notice);
 }
 
-function seated(engine: TableEngine): Participant[] {
-  return engine.state.participants.map((entry) => entry.participant);
+/** The other proposals, by letter, rotated so each reviewer starts reading at a different one. */
+function othersFor(engine: TableEngine, ownId: string, proposals: readonly Proposal[]): { label: string; text: string }[] {
+  const all = byLabel(engine, proposals);
+  const offset = all.findIndex((item) => item.label === labelOf(engine, ownId));
+  return rotate(
+    all.filter((item) => item.label !== labelOf(engine, ownId)),
+    Math.max(0, offset),
+  );
+}
+
+/**
+ * Sorted by label, so the position of a proposal in a prompt says nothing about its author either, and with every
+ * seat's name masked in the text.
+ */
+function byLabel(engine: TableEngine, proposals: readonly Proposal[]): { label: string; text: string }[] {
+  return proposals
+    .map((proposal) => ({ label: labelOf(engine, proposal.participantId), text: masked(engine, proposal.text) }))
+    .sort((a, b) => a.label.length - b.label.length || (a.label < b.label ? -1 : 1));
+}
+
+function masked(engine: TableEngine, text: string): string {
+  return redactIdentities(
+    text,
+    engine.state.participants.map((entry) => entry.participant),
+    engine.state.motion,
+  );
+}
+
+function labelOf(engine: TableEngine, id: string): string {
+  return engine.state.labels[id] ?? "?";
 }
 
 function idFor(engine: TableEngine, label: string): string {
   return Object.entries(engine.state.labels).find(([, value]) => value === label)?.[0] ?? label;
 }
 
+/**
+ * Ends the table when there is nothing left to deliberate: fewer than two proposals, or nobody seated to carry on.
+ * Whatever proposal exists still becomes the answer, labelled as a fallback.
+ */
 function requireTable(engine: TableEngine): void {
   engine.throwIfAborted();
-  if (live(engine).length < MIN_REVIEWERS) {
-    throw new StopTable(engine.budgetEnded ? "budget" : "insufficientParticipants");
+  const { proposals } = engine.state;
+  if (proposals.length >= MIN_PROPOSALS && engine.active().length > 0) {
+    return;
   }
+  const reason = engine.budgetEnded ? "budget" : "insufficientParticipants";
+  fallBack(
+    engine,
+    reason === "budget"
+      ? "The budget ran out before the table could deliberate; the final answer is a single proposal as written."
+      : "Too few models answered to deliberate; the final answer is the one proposal the table has, as written.",
+  );
+  throw new StopTable(reason);
 }

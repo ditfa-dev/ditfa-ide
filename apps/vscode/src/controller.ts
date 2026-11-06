@@ -54,6 +54,7 @@ import type {
   ModelChoice,
   PermissionLevel,
   QueuedMessage,
+  RoundTableEntry,
   SessionHeader,
   SessionState,
   SetupOption,
@@ -168,6 +169,8 @@ export class DitfaController implements vscode.Disposable {
   private readonly stateEmitter = new vscode.EventEmitter<void>();
   private readonly patchEmitter = new vscode.EventEmitter<Partial<SessionState>>();
   private readonly entryEmitter = new vscode.EventEmitter<ChatEntry>();
+  /** Round tables with no conversation to live in (the engine is not running, or their blank chat was left). */
+  private readonly detachedTables = new Map<string, RoundTableEntry>();
   private readonly removeEmitter = new vscode.EventEmitter<string>();
   private readonly composerEmitter = new vscode.EventEmitter<string>();
   private readonly editorEmitter = new vscode.EventEmitter<ActiveEditorInfo | null>();
@@ -206,24 +209,15 @@ export class DitfaController implements vscode.Disposable {
         const models = (await this.providers?.listModels(provider, apiKey)) ?? [];
         return models.map((model) => ({ id: model.id, label: model.label }));
       },
-      upsert: (entry) => {
-        const session = this.session;
-        if (session) {
-          session.upsertHostEntry(entry, entry.status !== "running");
-        } else {
-          this.entryEmitter.fire(entry);
-        }
+      currentThread: () => this.session?.threadId ?? null,
+      workingDirectory: () => this.threadCwd(),
+      upsert: (entry, threadId) => this.upsertTableEntry(entry, threadId),
+      lookup: (entryId) => {
+        const found = this.session?.snapshot().entries.find((candidate) => candidate.id === entryId);
+        return found?.kind === "roundtable" ? found : (this.detachedTables.get(entryId) ?? null);
       },
-      implement: async (text) => {
-        await this.setChatMode("agent");
-        await this.send(
-          `Carry out the result of the round table below, step by step.\n\n${text}`,
-          [],
-          null,
-          false,
-          "queue",
-        );
-      },
+      // The work goes to the agent in Agent mode for this one message; the user's chosen mode stays as it is.
+      implement: (prompt) => this.send(prompt, [], null, false, "queue", "agent"),
     });
     this.store = new TranscriptStore(join(context.globalStorageUri.fsPath, "transcripts"), logger);
     this.diffs = new DiffService(logger);
@@ -303,11 +297,39 @@ export class DitfaController implements vscode.Disposable {
     return this.binary?.path;
   }
 
+  /**
+   * Puts a round table's card in the conversation it started in. When that conversation is not the open one the
+   * card is saved straight into its transcript; a blank chat's table moves with it into the thread its first
+   * message creates. Returns the conversation the card now lives in.
+   */
+  private upsertTableEntry(entry: RoundTableEntry, threadId: string | null): string | null {
+    const session = this.session;
+    const settled = entry.status !== "running" && entry.status !== "stopping";
+    if (!session) {
+      this.detachedTables.set(entry.id, entry);
+      this.entryEmitter.fire(entry);
+      return threadId;
+    }
+    const open = session.threadId;
+    if (open === threadId || (threadId === null && (open === null || session.hasEntry(entry.id)))) {
+      this.detachedTables.delete(entry.id);
+      session.upsertHostEntry(entry, settled);
+      return open;
+    }
+    if (threadId !== null) {
+      if (settled) void this.store.upsertEntry(threadId, entry);
+      return threadId;
+    }
+    // Its blank chat was left before sending anything: nowhere to keep it but this window.
+    this.detachedTables.set(entry.id, entry);
+    return null;
+  }
+
   snapshot(): SessionState {
     const session = this.session?.snapshot();
     return {
       header: this.buildHeader(),
-      entries: session?.entries ?? [],
+      entries: session?.entries ?? [...this.detachedTables.values()],
       plan: session?.plan ?? [],
       planExplanation: session?.planExplanation ?? null,
       tokenUsage: session?.tokenUsage ?? null,
@@ -416,6 +438,7 @@ export class DitfaController implements vscode.Disposable {
     skill: { name: string; path: string } | null = null,
     includeActiveFile = true,
     delivery: "auto" | "queue" | "steer" = "auto",
+    modeOverride: ChatMode | null = null,
   ): Promise<void> {
     await this.connect();
     const session = this.session;
@@ -432,7 +455,7 @@ export class DitfaController implements vscode.Disposable {
     }
 
     const settings = readSettings();
-    const mode = settings.chatMode;
+    const mode = modeOverride ?? settings.chatMode;
     const active = includeActiveFile && settings.attachActiveFile ? this.activeFileContext() : null;
     const note = modeNote(mode);
     const input = buildUserInput(text, attachments, active, skill, [...session.takeNotes(), ...(note ? [note] : [])]);

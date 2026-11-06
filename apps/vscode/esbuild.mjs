@@ -31,7 +31,8 @@ const extensionConfig = {
   platform: "node",
   target: "node20",
   format: "cjs",
-  external: ["vscode"],
+  // `ws` (the device bridge's socket) is bundled; its optional native speedups are not, and it works without them.
+  external: ["vscode", "bufferutil", "utf-8-validate"],
   define: { "process.env.NODE_ENV": JSON.stringify(production ? "production" : "development") },
 };
 

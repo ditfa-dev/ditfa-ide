@@ -2,7 +2,9 @@ import { describe, expect, it, vi } from "vitest";
 
 import { createRoundTable, runRoundTable, type TableEvent } from "@ditfa-ide/roundtable";
 
-import { fakeRunner, reviewReply, seats } from "./fakes";
+import type { ModelRunner } from "@ditfa-ide/roundtable/types";
+
+import { fakeRunner, reviewReply, seats, stepOf } from "./fakes";
 
 const motion = "Pick a database";
 
@@ -37,7 +39,7 @@ describe("limits", () => {
     table.abort();
     const aborted = await done;
     expect(aborted.endedBy).toBe("aborted");
-    expect(aborted.participants.every((entry) => entry.status === "done")).toBe(true);
+    expect(aborted.participants.every((entry) => entry.status === "stopped")).toBe(true);
 
     const timedOut = await runRoundTable({ motion, mode: "review", participants: seats(), runner: fakeRunner(deaf), timeoutMs: 10 });
     expect(timedOut.endedBy).toBe("insufficientParticipants");
@@ -130,5 +132,124 @@ describe("limits", () => {
     const runner = fakeRunner(reviewReply());
     const state = await runRoundTable({ motion, mode: "review", participants: seats(), runner });
     expect(state.participants.every((entry) => entry.usageEstimated && entry.usage.outputTokens > 0)).toBe(true);
+  });
+
+  it("retries a rate-limited call with a new call id and keeps the participant", async () => {
+    const events: TableEvent[] = [];
+    let limited = false;
+    const reply = reviewReply();
+    const runner = fakeRunner((request, signal) => {
+      if (request.participant.id === "seat-beta" && stepOf(request) === "propose" && !limited) {
+        limited = true;
+        throw Object.assign(new Error("Rate limit reached"), { status: 429 });
+      }
+      return reply(request, signal);
+    });
+    const state = await runRoundTable({
+      motion,
+      mode: "review",
+      participants: seats(),
+      runner,
+      retryDelayMs: 0,
+      onEvent: (event) => events.push(event),
+    });
+
+    expect(state.proposals).toHaveLength(3);
+    expect(state.participants.find((entry) => entry.participant.id === "seat-beta")?.status).toBe("done");
+    const betaCalls = events.filter(
+      (event): event is Extract<TableEvent, { type: "participantStarted" }> =>
+        event.type === "participantStarted" && event.participantId === "seat-beta" && event.phase === "propose",
+    );
+    expect(betaCalls).toHaveLength(2);
+    expect(betaCalls[0]?.callId).not.toBe(betaCalls[1]?.callId);
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "participantFailed", callId: betaCalls[0]?.callId, error: "Rate limit reached", willRetry: true }),
+    );
+    // Every call id at the table is unique.
+    const ids = events.flatMap((event) => (event.type === "participantStarted" ? [event.callId] : []));
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("gives up after two retries", async () => {
+    const reply = reviewReply();
+    const runner = fakeRunner((request, signal) => {
+      if (request.participant.id === "seat-gamma") throw Object.assign(new Error("Service unavailable"), { status: 503 });
+      return reply(request, signal);
+    });
+    const state = await runRoundTable({ motion, mode: "review", participants: seats(), runner, retryDelayMs: 0 });
+    expect(runner.requests.filter((request) => request.participant.id === "seat-gamma")).toHaveLength(3);
+    expect(state.participants.find((entry) => entry.participant.id === "seat-gamma")).toMatchObject({
+      status: "failed",
+      error: "Service unavailable",
+    });
+  });
+
+  it("fails a call that stops streaming as stalled, after retrying it", async () => {
+    const reply = reviewReply();
+    let stalls = 0;
+    const runner: ModelRunner = {
+      async run(request, signal, onDelta) {
+        if (request.participant.id === "seat-gamma") {
+          stalls += 1;
+          onDelta("Thinking about it");
+          return { text: await hang(request, signal) };
+        }
+        const text = await reply(request, signal);
+        return typeof text === "string" ? { text } : text;
+      },
+    };
+    const state = await runRoundTable({ motion, mode: "review", participants: seats(), runner, inactivityMs: 20, retryDelayMs: 0 });
+    expect(stalls).toBe(3);
+    expect(state.participants.find((entry) => entry.participant.id === "seat-gamma")).toMatchObject({
+      status: "failed",
+      error: "Stalled: nothing arrived for 20 ms.",
+    });
+    expect(state.endedBy).toBe("completed");
+  });
+
+  it("keeps a synthesis stopped mid-stream as a partial answer, and marks running models stopped", async () => {
+    const events: TableEvent[] = [];
+    const reply = reviewReply();
+    const runner: ModelRunner = {
+      async run(request, signal, onDelta) {
+        if (stepOf(request) === "synthesize") {
+          onDelta("The table agrees on caching");
+          return { text: await hang(request, signal) };
+        }
+        const text = await reply(request, signal);
+        return typeof text === "string" ? { text } : text;
+      },
+    };
+    const table = createRoundTable({
+      motion,
+      mode: "review",
+      participants: seats(),
+      runner,
+      onEvent: (event) => {
+        events.push(event);
+        if (event.type === "synthesisDelta") table.abort();
+      },
+    });
+    const state = await table.run();
+
+    expect(state.endedBy).toBe("aborted");
+    expect(state).toMatchObject({ finalAnswer: "The table agrees on caching", finalState: "partial", finalBy: state.leaderId });
+    const leader = state.participants.find((entry) => entry.participant.id === state.leaderId);
+    expect(leader?.status).toBe("stopped");
+    expect(state.participants.filter((entry) => entry.status === "done")).toHaveLength(2);
+    expect(events.at(-1)).toMatchObject({ type: "tableCompleted", endedBy: "aborted", finalState: "partial" });
+    expect(events).toContainEqual({ type: "notice", text: "The table was stopped while the final answer was being written, so it is cut off." });
+  });
+
+  it("asks for small rankings and large proposals unless one cap is set", async () => {
+    const runner = fakeRunner(reviewReply());
+    await runRoundTable({ motion, mode: "review", participants: seats(), runner });
+    const capOf = (step: string) => runner.requests.find((request) => stepOf(request) === step)?.maxTokens ?? 0;
+    expect(capOf("rank")).toBeLessThan(capOf("propose"));
+    expect(capOf("synthesize")).toBeGreaterThan(capOf("propose"));
+
+    const fixed = fakeRunner(reviewReply());
+    await runRoundTable({ motion, mode: "review", participants: seats(), runner: fixed, maxTokensPerCall: 777 });
+    expect(new Set(fixed.requests.map((request) => request.maxTokens))).toEqual(new Set([777]));
   });
 });

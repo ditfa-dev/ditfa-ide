@@ -44,12 +44,27 @@ export function offeredLetters(request: RunRequest): string[] {
   return match?.[1]?.split(", ") ?? [];
 }
 
-export type Step = "propose" | "critique" | "rank" | "synthesize" | "plan" | "execute" | "review" | "revise" | "integrate";
+export type Step =
+  | "propose"
+  | "critique"
+  | "rank"
+  | "synthesize"
+  | "plan"
+  | "execute"
+  | "review"
+  | "revise"
+  | "integrate"
+  | "find"
+  | "vote"
+  | "verdict";
 
 export function stepOf(request: RunRequest): Step {
   const text = prompt(request);
+  if (text.includes("Review the changes on your own")) return "find";
+  if (text.includes("Vote on every finding")) return "vote";
+  if (text.includes("Write a short verdict")) return "verdict";
   if (text.includes("Write your own proposal")) return "propose";
-  if (text.includes("## Critique")) return "critique";
+  if (text.includes("Critique each other proposal")) return "critique";
   if (text.includes("Rank these proposals")) return "rank";
   if (text.includes("Write the table's answer")) return "synthesize";
   if (text.includes("Split the goal")) return "plan";
@@ -72,7 +87,7 @@ export function reviewReply(overrides: Partial<Record<Step, Reply>> = {}): Reply
         if (!words.has(request.participant.id)) words.set(request.participant.id, `idea-${words.size + 1}`);
         return `Proposal: ${words.get(request.participant.id)}`;
       case "critique":
-        return "## Critique\nLooks fine.\n\n## Revised proposal\nNO CHANGE";
+        return JSON.stringify({ critique: "Looks fine.", changed: false, revised_proposal: null });
       case "rank":
         return JSON.stringify({ ranking: offeredLetters(request) });
       default:

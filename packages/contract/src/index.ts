@@ -138,22 +138,61 @@ export interface ErrorEntry extends EntryBase {
   action?: ErrorAction | null;
 }
 
-/** One model at the round table, as its lane shows it. */
+/**
+ * How a group of models works on one request:
+ * - `review`: each answers blind, they critique each other anonymously, rank, and the leader writes the verdict;
+ * - `team`: the leader splits the work, each part goes to the best-suited model, is reviewed, and merged;
+ * - `code`: Panel Review. Each model reviews the working changes blind, they vote on each other's findings, and
+ *   only what the panel agrees on is reported, with a fix the agent can apply.
+ */
+export type RoundTableMode = "review" | "team" | "code";
+
+export type RoundTableLaneStatus = "waiting" | "thinking" | "done" | "failed" | "stopped";
+
+/** One model call, kept so its whole conversation can be read afterwards, grouped by phase. */
+export interface RoundTableMessage {
+  /** The engine's call id: unique at the table. */
+  id: string;
+  /** The step it belongs to, as the rail names it: "Answer", "Critique · round 1", "Vote"… */
+  phase: string;
+  /** What the call was for: "Proposal", a subtask title, "Review of 6 files"… */
+  task: string;
+  text: string;
+  status: "streaming" | "done" | "failed" | "stopped";
+}
+
+/** One model on the team, as its roster row shows it. */
 export interface RoundTableLane {
   participantId: string;
-  /** "A", "B"… while the table is anonymous; the model's name once it is revealed (and always in team mode). */
+  /** "A", "B"… from the start: how the others see it while the table is anonymous. */
+  letter: string | null;
+  /** The letter while anonymous (review and code modes); the model's name once revealed, and always in team mode. */
   label: string;
   model: string;
   provider: string;
+  /** `provider:model`: a stable key for its colour. */
+  ref: string;
   isLeader: boolean;
-  status: "waiting" | "thinking" | "done" | "failed";
+  status: RoundTableLaneStatus;
   /** What it is doing now: "Proposal", "Critique, round 1", "Ranking", a subtask title… */
   task: string;
-  /** The latest text it wrote. */
+  /** The text of its current or latest call. */
   text: string;
   error: string | null;
   outputTokens: number;
+  /** Every call it made, oldest first. */
+  messages: RoundTableMessage[];
 }
+
+export type RoundTableSubtaskStatus =
+  | "pending"
+  | "running"
+  | "reviewing"
+  | "revising"
+  | "done"
+  | "failed"
+  | "skipped"
+  | "stopped";
 
 export interface RoundTableSubtask {
   id: string;
@@ -162,28 +201,101 @@ export interface RoundTableSubtask {
   assignee: string | null;
   /** Why that model: its best skills for this subtask. */
   reason: string | null;
-  status: "pending" | "running" | "reviewing" | "revising" | "done" | "failed";
+  status: RoundTableSubtaskStatus;
+}
+
+/** One step of the phase rail. */
+export interface RoundTablePhaseStep {
+  key: string;
+  label: string;
+  state: "pending" | "active" | "done" | "skipped";
+}
+
+export type FindingSeverity = "critical" | "high" | "medium" | "low";
+
+/** A problem the review panel found in the working changes, merged across reviewers and voted on. */
+export interface RoundTableFinding {
+  id: string;
+  /** Workspace-relative path. */
+  file: string;
+  startLine: number;
+  endLine: number;
+  severity: FindingSeverity;
+  /** "bug", "security", "performance", "correctness", "maintainability"… */
+  category: string;
+  title: string;
+  why: string;
+  /** A suggested fix in prose or as a small patch; the agent applies it through its own approval flow. */
+  fix: string | null;
+  /** Lane labels of the reviewers who raised it on their own. */
+  raisedBy: string[];
+  /** Votes from reviewers who did not raise it. */
+  votes: { confirm: number; reject: number; unsure: number };
+  /** unanimous: everyone agrees; majority: more confirm than reject; single: one reviewer, no backing; disputed: rejected. */
+  agreement: "unanimous" | "majority" | "single" | "disputed";
+  /** 0..1 */
+  confidence: number;
 }
 
 export interface RoundTableEntry extends EntryBase {
   kind: "roundtable";
-  mode: "review" | "team";
+  mode: RoundTableMode;
+  /** The request; in code mode, an optional focus ("check the auth changes"). */
   motion: string;
-  status: "running" | "completed" | "stopped" | "failed";
-  /** Human-readable current step: "Proposals", "Critique · round 2", "Final answer"… */
+  /** `stopping` lasts from the Stop click until every running call has ended. */
+  status: "running" | "stopping" | "completed" | "stopped" | "failed";
+  /** Human-readable current step: "Answers", "Critique · round 2", "Verdict"… */
   phase: string;
+  /** The steps of this mode, with where the table is. */
+  phases: RoundTablePhaseStep[];
   lanes: RoundTableLane[];
   subtasks: RoundTableSubtask[];
   /** Peer ranking (review mode), best first. */
   rankings: { label: string; score: number }[];
-  /** The leader's synthesis (review) or integrated deliverable (team), streamed. */
+  /** The leader's verdict (review), the integrated deliverable (team), or the review summary (code), streamed. */
   final: string;
+  /**
+   * complete: written in full by the leader; partial: cut off (stop, budget, length); fallback: the leader could
+   * not write it, so the best-ranked answer stands in; none: there is nothing to show.
+   */
+  finalState: "none" | "streaming" | "complete" | "partial" | "fallback";
+  /** Lane label of whoever wrote the final text. */
+  finalBy: string | null;
+  /** Code mode: what was reviewed ("6 files, +120 −14, uncommitted changes"). */
+  scope: string | null;
+  /** Code mode: the panel's findings, most severe first. */
+  findings: RoundTableFinding[];
+  /** Things the user should know: a model that dropped out, a skipped step, the budget… */
+  notices: string[];
+  /** Why the table failed, when it did. */
+  error: string | null;
   /** Who wrote what is shown: after a review ends, and always in team mode. */
   revealed: boolean;
   usage: { outputTokens: number; estimated: boolean };
-  endedBy: "completed" | "budget" | "aborted" | "insufficientParticipants" | null;
+  endedBy: "completed" | "budget" | "aborted" | "insufficientParticipants" | "failed" | null;
   /** The Markdown report, once the table is done. */
   report: string | null;
+  startedAt: number;
+  endedAt: number | null;
+}
+
+export const MOTION_MAX_CHARS = 8_000;
+
+/**
+ * Why a request cannot go to the table yet, or null when it can. The webview checks before sending and the host
+ * checks again; both show the same words. Code mode needs no request: the working changes are the subject.
+ */
+export function motionProblem(motion: string, mode: RoundTableMode): string | null {
+  const text = motion.trim();
+  if (mode === "code") {
+    return text.length > MOTION_MAX_CHARS ? `Keep the focus under ${MOTION_MAX_CHARS.toLocaleString("en")} characters.` : null;
+  }
+  if (!text) return "Write what the team should work on.";
+  if (text.length > MOTION_MAX_CHARS) return `Keep the request under ${MOTION_MAX_CHARS.toLocaleString("en")} characters.`;
+  const letters = text.replace(/[\s\p{P}\p{S}\d]/gu, "").length;
+  const words = text.split(/\s+/).filter(Boolean).length;
+  if (letters < 12 && words < 3) return "Say a little more: the team needs a question, idea or task to work on.";
+  return null;
 }
 
 /** A model the round table can seat. */
@@ -565,7 +677,11 @@ export type HostMessage =
   | { type: "voicePlaybackStop" }
   /** A turn finished while the panel was visible: a short sound, when enabled. */
   | { type: "chime" }
-  | { type: "roundTableOptions"; options: RoundTableOption[]; suggested: string[]; error: string | null };
+  | { type: "roundTableOptions"; options: RoundTableOption[]; suggested: string[]; error: string | null }
+  /** The table the webview asked for is seated: its card is in the transcript. `requestId` echoes the start. */
+  | { type: "roundTableStarted"; requestId: string; entryId: string }
+  /** The table could not start; the webview keeps the request so nothing typed is lost. */
+  | { type: "roundTableRejected"; requestId: string; reason: string };
 
 /** Webview -> extension host. */
 export type WebviewMessage =
@@ -660,6 +776,12 @@ export type WebviewMessage =
   /** Everything queued for playback has played. */
   | { type: "voicePlaybackEnded" }
   | { type: "requestRoundTableOptions" }
-  | { type: "startRoundTable"; motion: string; mode: "review" | "team"; participants: string[] }
+  | { type: "startRoundTable"; requestId: string; motion: string; mode: RoundTableMode; participants: string[] }
   | { type: "stopRoundTable"; entryId: string }
-  | { type: "roundTableAction"; entryId: string; action: "implement" | "copy" | "save" };
+  | {
+      type: "roundTableAction";
+      entryId: string;
+      /** implement: hand the result to the agent; fixFinding / fixAll: hand confirmed findings to the agent; open: show a finding's lines. */
+      action: "implement" | "copy" | "save" | "fixFinding" | "fixAll" | "openFinding";
+      findingId?: string;
+    };

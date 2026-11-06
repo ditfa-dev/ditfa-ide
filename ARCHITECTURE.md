@@ -9,6 +9,7 @@
 │  ├─ completion/quickFix Tab suggestions, Fix with Ditfa             │        │
 │  ├─ roundtable          RoundTableService → @ditfa-ide/roundtable   │        │
 │  ├─ voice               microphone, dictation, voice mode           │        │
+│  ├─ devices             device bridge: terminal access for Ditfa ───┤        │
 │  └─ ui                  chat view, settings panel  ◄── postMessage ─┼──┐     │
 │          │                                                          │  │     │
 │          │ JSON-RPC over stdio                                      │  │     │
@@ -30,7 +31,7 @@ Each package is TypeScript, published inside the repository as `@ditfa-ide/<name
 
 - **protocol**: the engine's JSON-RPC types, generated from `ditfa-rs/app-server-protocol` by `scripts/sync-protocol.mjs`. Never edited by hand.
 - **contract**: every message between the extension host and its panels (`HostMessages`, `WebviewMessages`, settings snapshots). Both sides type-check against it, so a renamed field fails the build, not the user.
-- **core**: logic with no editor dependency: diff parsing and word-level rows, hunk revert, checkpoints, completion prompts, quick-fix windows and parsing, the message queue, modes, transcript storage, speech detection. A `Logger` interface replaces the output channel.
+- **core**: logic with no editor dependency: diff parsing and word-level rows, hunk revert, checkpoints, completion prompts, quick-fix windows and parsing, the message queue, modes, transcript storage, speech detection, and the device bridge (protocol, socket client with reconnects, terminal text: ANSI stripping, secret redaction, output tails). A `Logger` interface replaces the output channel.
 - **cloud**: the Ditfa API client: PKCE sign-in and code exchange, profile and usage, model catalog, voice (transcribe, synthesize, socket), and a streaming chat client for OpenAI-compatible and Anthropic endpoints. Uses `fetch` only, with timeouts, no redirects, and typed errors (`planRequired`, `unauthorized`).
 - **roundtable**: the round-table engine. Pure TypeScript; models are reached through an injected `ModelRunner`, so it runs the same against Ditfa, a user's keys, local models, or test fakes.
 - **webview**: the chat panel and the settings panel. Plain DOM and CSS, under 110 KB, rendered from `contract` state.
@@ -55,3 +56,7 @@ A message carries its mode (chat, plan, agent) and access level (read only … f
 ## Voice
 
 Dictation records 16 kHz PCM, sends WAV to Ditfa for transcription, and inserts the text. Voice mode adds a speech detector for turn taking and barge-in, sends the request to the agent or a quick assistant, chunks the reply into sentences, and plays synthesized audio as it arrives.
+
+## Terminal access (device bridge)
+
+With `ditfa.terminalAccess` on (`ask` or `allow`, off by default) and a Ditfa sign-in, the extension keeps one WebSocket to `wss://chat.ditfa.com/api/devices/ws`, says hello with the sign-in's MCP key, and answers `terminal_list`, `terminal_read` and `terminal_run` calls from Ditfa (web chat, the desktop app, MCP clients). Output comes from the Shell Integration API (VS Code 1.93+): the last 30 commands per terminal, each with a bounded tail, escape codes stripped and secrets redacted before it is sent. `terminal_run` asks the user in a modal in `ask` mode, never runs in Restricted Mode, and runs in a visible "Ditfa" terminal unless the caller names one. The protocol mirrors `packages/shared/src/devices/protocol.ts` in the Ditfa monorepo.

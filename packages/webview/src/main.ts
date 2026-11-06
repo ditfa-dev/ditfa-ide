@@ -11,6 +11,8 @@ import type {
   ProviderTab,
   ModelChoice,
   PermissionLevel,
+  RoundTableEntry,
+  RoundTableMode,
   RoundTableOption,
   SessionState,
   SetupOption,
@@ -19,11 +21,12 @@ import type {
   VoiceView,
   WebviewMessage,
 } from "@ditfa-ide/contract";
+import { motionProblem } from "@ditfa-ide/contract";
+import { MAX_ROUNDTABLE_PARTICIPANTS } from "@ditfa-ide/contract/settings";
 import {
   commandOutputHtml,
   commandStatusLabel,
   diffStat,
-  formatTokens,
   renderApproval,
   renderEntry,
   sumChanges,
@@ -31,10 +34,10 @@ import {
   type RenderContext,
 } from "./entries";
 import { icons, sparkle } from "./icons";
-import { escapeHtml, renderMarkdown, token, whole } from "./markdown";
+import { escapeHtml, formatTokens, renderMarkdown, token, whole } from "./markdown";
 import { markSvg } from "./mark";
 import { createVoiceIo } from "./voice";
-import { seatColor, seatInitials, tableDiagram, type Seat } from "./roundtableView";
+import { RoundTableCard, seatColor, seatInitials } from "./roundtableView";
 import { joinDictation } from "@ditfa-ide/core/voice/dictationText";
 
 declare function acquireVsCodeApi(): {
@@ -67,9 +70,17 @@ type Popover =
       kind: "roundtable";
       options: RoundTableOption[] | null;
       selected: string[];
-      mode: "review" | "team";
+      mode: RoundTableMode;
       error: string | null;
+      /** Why the table cannot start: the request's problem, or the host's refusal. */
       note: string | null;
+      /** The request as typed in the sheet. Written into the field after each render, never into markup. */
+      motion: string;
+      /** The composer text the request started from, so a started table can clear it. */
+      prefill: string;
+      filter: string;
+      /** The start sent and not yet answered. */
+      pending: string | null;
     };
 
 const CHAT_MODES: { id: ChatMode; label: string; detail: string; icon: string }[] = [
@@ -167,6 +178,14 @@ let editing: string | null = null;
 
 /** Rendered rows, so a delta touches one row instead of the transcript. */
 const entryNodes = new Map<string, HTMLElement>();
+/** Live round-table cards: built once, then patched on every update. */
+const roundTables = new Map<string, RoundTableCard>();
+let tableTimer = 0;
+/** Whether the composer's button currently stops a table. */
+let tableRunning = false;
+let tableMode: RoundTableMode = "review";
+/** A start sheet closed while its start was in flight: it opens again if the host refuses. */
+let parkedSheet: Extract<Popover, { kind: "roundtable" }> | null = null;
 const entriesById = new Map<string, ChatEntry>();
 const expanded = new Set<string>();
 const codeBlocks = new Map<string, string[]>();
@@ -403,11 +422,41 @@ function handleMessage(message: HostMessage): void {
     case "roundTableOptions":
       if (popover?.kind === "roundtable") {
         popover.options = message.options;
-        popover.selected = message.suggested;
+        popover.selected = message.suggested.slice(0, MAX_ROUNDTABLE_PARTICIPANTS);
         popover.error = message.error;
         renderPopover();
       }
       break;
+    case "roundTableStarted": {
+      const sheet = sheetWaitingFor(message.requestId);
+      if (sheet) {
+        // The request came from the composer: it now lives in the card.
+        if (sheet.prefill.trim() && composer.value.trim() === sheet.prefill.trim()) {
+          composer.value = "";
+          autoGrow();
+          saveDraft();
+          renderToolbar();
+        }
+        sheet.pending = null;
+        parkedSheet = null;
+        if (popover === sheet) closePopover();
+        scrollToBottom();
+        updateJump();
+      }
+      break;
+    }
+    case "roundTableRejected": {
+      const sheet = sheetWaitingFor(message.requestId);
+      if (sheet) {
+        // Nothing typed is lost: the sheet opens again with the request and says why.
+        sheet.pending = null;
+        sheet.note = message.reason;
+        parkedSheet = null;
+        popover = sheet;
+        renderPopover();
+      }
+      break;
+    }
   }
 }
 
@@ -790,9 +839,17 @@ function renderTranscript(): void {
   transcript.innerHTML = "";
   entryNodes.clear();
   entriesById.clear();
+  const cards = new Map(roundTables);
+  roundTables.clear();
   for (const entry of state.entries) {
     entriesById.set(entry.id, entry);
-    const node = buildEntry(entry);
+    // A card that is already live keeps its node, so what the user opened stays open.
+    const card = entry.kind === "roundtable" ? cards.get(entry.id) : undefined;
+    if (card && entry.kind === "roundtable") {
+      card.update(entry);
+      roundTables.set(entry.id, card);
+    }
+    const node = card?.node ?? buildEntry(entry);
     if (node) {
       entryNodes.set(entry.id, node);
       transcript.appendChild(node);
@@ -800,6 +857,7 @@ function renderTranscript(): void {
   }
   renderEmpty();
   scrollToBottom();
+  syncTables();
 }
 
 /** The welcome screen lives inside the transcript and only exists while it is empty. */
@@ -831,15 +889,61 @@ function renderEmpty(): void {
 }
 
 function buildEntry(entry: ChatEntry): HTMLElement | null {
+  const node = document.createElement("div");
+  node.className = `entry entry-${token(entry.kind)}`;
+  node.dataset.entryId = entry.id;
+  if (entry.kind === "roundtable") {
+    roundTables.set(entry.id, mountTable(node, entry));
+    return node;
+  }
   const html = renderEntry(entry, renderContext());
   if (html === null) {
     return null;
   }
-  const node = document.createElement("div");
-  node.className = `entry entry-${token(entry.kind)}`;
-  node.dataset.entryId = entry.id;
   node.innerHTML = html;
   return node;
+}
+
+function mountTable(node: HTMLElement, entry: RoundTableEntry): RoundTableCard {
+  return new RoundTableCard(node, entry, {
+    post: (message) => vscode.postMessage(message),
+    codeBlocks: (id, blocks) => codeBlocks.set(id, blocks),
+  });
+}
+
+/** The newest table still running, for the composer's Stop and Esc. */
+function runningTable(): RoundTableCard | null {
+  let latest: RoundTableCard | null = null;
+  for (const card of roundTables.values()) {
+    if (card.running) latest = card;
+  }
+  return latest;
+}
+
+/** Keeps the clocks of live cards ticking, and the composer's Stop in step with them. */
+function syncTables(): void {
+  const running = runningTable() !== null;
+  if (running !== tableRunning) {
+    tableRunning = running;
+    renderToolbar();
+  }
+  const live = [...roundTables.values()].some((card) => card.live);
+  if (live && !tableTimer) {
+    tableTimer = window.setInterval(() => {
+      for (const card of roundTables.values()) {
+        if (card.live) card.tick();
+      }
+      syncTables();
+    }, 1000);
+  } else if (!live && tableTimer) {
+    window.clearInterval(tableTimer);
+    tableTimer = 0;
+  }
+}
+
+function stopTable(card: RoundTableCard): void {
+  card.stop();
+  syncTables();
 }
 
 function upsertEntry(entry: ChatEntry): void {
@@ -870,6 +974,7 @@ function upsertEntry(entry: ChatEntry): void {
         transcript.appendChild(fresh);
       }
       entryNodes.set(entry.id, fresh);
+      if (entry.kind === "roundtable") syncTables();
     }
   }
 
@@ -887,6 +992,14 @@ function upsertEntry(entry: ChatEntry): void {
 
 /** Updates a streaming row in place, which keeps scroll position and text selection. */
 function patchInPlace(node: HTMLElement, entry: ChatEntry): boolean {
+  if (entry.kind === "roundtable") {
+    const card = roundTables.get(entry.id);
+    if (card?.node === node) {
+      card.update(entry);
+      syncTables();
+      return true;
+    }
+  }
   if (entry.kind === "assistant") {
     const body = node.querySelector(".markdown");
     if (body) {
@@ -913,6 +1026,7 @@ function patchInPlace(node: HTMLElement, entry: ChatEntry): boolean {
 }
 
 function removeEntry(id: string): void {
+  if (roundTables.delete(id)) syncTables();
   entriesById.delete(id);
   state.entries = state.entries.filter((entry) => entry.id !== id);
   entryNodes.get(id)?.remove();
@@ -922,6 +1036,10 @@ function removeEntry(id: string): void {
 
 function rerenderEntry(id: string): void {
   const entry = entriesById.get(id);
+  if (entry?.kind === "roundtable") {
+    roundTables.get(id)?.update(entry);
+    return;
+  }
   const node = entryNodes.get(id);
   if (entry && node) {
     const fresh = buildEntry(entry);
@@ -1071,11 +1189,18 @@ function renderToolbar(): void {
   const header = state.header;
   const send = document.getElementById("send") as HTMLButtonElement;
   const typed = composer.value.trim().length > 0;
-  const stop = state.turnActive && !typed;
-  send.innerHTML = stop ? icons.stop : state.turnActive ? icons.queue : icons.send;
-  send.title = stop ? "Stop" : state.turnActive ? "Queue: send when this turn ends" : "Send";
+  const table = runningTable() !== null;
+  const stop = (state.turnActive || table) && !typed;
+  const icon = stop ? "stop" : state.turnActive ? "queue" : "send";
+  // Swapping the icon under a pressed button can lose the click, so it only changes when it has to.
+  if (send.dataset.icon !== icon) {
+    send.dataset.icon = icon;
+    send.innerHTML = icons[icon];
+  }
+  send.title = stop ? (table ? "Stop the round table (Esc)" : "Stop (Esc)") : state.turnActive ? "Queue: send when this turn ends" : "Send";
+  send.setAttribute("aria-label", send.title);
   send.classList.toggle("stop", stop);
-  send.disabled = header.connection !== "ready";
+  send.disabled = header.connection !== "ready" && !table;
 
 
   const hint = document.getElementById("composer-hint") as HTMLElement;
@@ -1344,7 +1469,7 @@ function renderPopover(): void {
       break;
     }
     case "roundtable":
-      host.innerHTML = roundTableSheet(popover);
+      renderTableSheet(host, popover);
       break;
     case "attach":
       host.innerHTML = attachMenu();
@@ -1377,6 +1502,7 @@ function renderPopover(): void {
 
 function closePopover(): void {
   if (popover) {
+    if (popover.kind === "roundtable" && popover.pending) parkedSheet = popover;
     popover = null;
     renderPopover();
   }
@@ -1453,7 +1579,17 @@ function wireEvents(): void {
   box.addEventListener("dragover", (event) => event.preventDefault());
   box.addEventListener("drop", onDrop);
 
+  // Menus and the Latest button sit above the footer, so they follow its height as the composer grows.
+  const footer = document.getElementById("footer") as HTMLElement;
+  new ResizeObserver(() => root.style.setProperty("--footer-h", `${Math.round(footer.offsetHeight)}px`)).observe(footer);
+
   scroll.addEventListener("scroll", updateJump, { passive: true });
+  // Stop acts on the press, not the release: a click can still be lost if anything moves under the pointer.
+  root.addEventListener("pointerdown", (event) => {
+    const button = event.button === 0 ? (event.target as Element | null)?.closest<HTMLElement>("[data-rt-stop]") : null;
+    const card = button ? roundTables.get(button.dataset.rtStop ?? "") : undefined;
+    if (card) stopTable(card);
+  });
   root.addEventListener("click", onClick);
   root.addEventListener("input", onInput);
   root.addEventListener("keydown", onRootKey);
@@ -1479,6 +1615,26 @@ function onRootKey(event: KeyboardEvent): void {
     }
     return;
   }
+  if (popover?.kind === "roundtable" && target.closest(".rt-sheet")) {
+    if (target.id === "rt-motion" && event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.isComposing) {
+      event.preventDefault();
+      startTable(popover);
+      return;
+    }
+    const step = { ArrowRight: 1, ArrowDown: 1, ArrowLeft: -1, ArrowUp: -1 }[event.key];
+    if (step && target.dataset.rtMode) {
+      // The modes are a radio group: arrows move the choice.
+      event.preventDefault();
+      const index = TABLE_MODES.findIndex((mode) => mode.id === target.dataset.rtMode);
+      const next = TABLE_MODES[(index + step + TABLE_MODES.length) % TABLE_MODES.length]?.id ?? "review";
+      popover.mode = next;
+      tableMode = next;
+      popover.note = null;
+      renderPopover();
+      document.querySelector<HTMLElement>(`[data-rt-mode="${next}"]`)?.focus();
+      return;
+    }
+  }
   if (target.matches("[data-edit-input]")) {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -1493,11 +1649,15 @@ function onRootKey(event: KeyboardEvent): void {
     return;
   }
   if (event.key === "Escape") {
+    const table = runningTable();
+    const typing = (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) && target.value.length > 0;
     if (historyOpen) {
       closeHistory();
     } else if (popover) {
       closePopover();
       composer.focus();
+    } else if (table && !typing) {
+      stopTable(table);
     } else if (state.turnActive) {
       vscode.postMessage({ type: "interrupt" });
     }
@@ -1530,6 +1690,20 @@ function onInput(event: Event): void {
   const card = target.closest<HTMLElement>("[data-approval-kind]");
   if (card && target.matches("input[data-hunk-pick]")) {
     syncApprovalButtons(card);
+    return;
+  }
+  if (popover?.kind === "roundtable" && (target.id === "rt-motion" || target.id === "rt-filter")) {
+    if (target.id === "rt-filter") {
+      popover.filter = target.value;
+      renderPopover();
+    } else {
+      popover.motion = target.value;
+      // A problem shown for the last attempt goes once the request changes.
+      if (popover.note && !popover.pending) {
+        popover.note = null;
+        renderPopover();
+      }
+    }
     return;
   }
   if (target.id === "model-filter" && popover?.kind === "models") {
@@ -1575,7 +1749,7 @@ function onComposerKey(event: KeyboardEvent): void {
   // During IME composition Enter confirms the candidate; it must not send.
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    submit(event.metaKey || event.ctrlKey ? "steer" : "auto");
+    submit(event.metaKey || event.ctrlKey ? "steer" : "auto", true);
   }
 }
 
@@ -1646,8 +1820,13 @@ function onClick(event: MouseEvent): void {
   }
   const hit = (selector: string) => target.closest<HTMLElement>(selector);
 
-  if (!hit("#popover") && !hit("#mode-button") && !hit("#model-button") && !hit("#attach") && !hit("#roundtable-button")) {
+  if (!hit("#popover") && !hit("#mode-button") && !hit("#model-button") && !hit("#attach")) {
     closePopover();
+  }
+  const card = roundTables.get(hit(".entry-roundtable")?.dataset.entryId ?? "");
+  if (card?.handleClick(target)) {
+    syncTables();
+    return;
   }
   if (onAccountOrQueueClick(hit)) {
     return;
@@ -1694,8 +1873,6 @@ function onClick(event: MouseEvent): void {
         ? null
         : { kind: "modes", index: CHAT_MODES.findIndex((mode) => mode.id === state.header.chatMode) };
     renderPopover();
-  } else if (hit("#roundtable-button")) {
-    openRoundTable();
   } else if (hit("#dictate")) {
     startVoice("dictation");
   } else if (hit("[data-voice-mode]")) {
@@ -2036,10 +2213,16 @@ function syncApprovalButtons(card: HTMLElement): void {
   }
 }
 
-function submit(delivery: "auto" | "steer" = "auto"): void {
+function submit(delivery: "auto" | "steer" = "auto", fromKey = false): void {
   const text = composer.value.trim();
   if (text.length === 0) {
-    if (state.turnActive) {
+    const table = runningTable();
+    // Only the Stop button stops a team: a habitual Enter in the empty composer must not throw away a long run.
+    if (table && !fromKey) {
+      stopTable(table);
+    } else if (table) {
+      return;
+    } else if (state.turnActive) {
       vscode.postMessage({ type: "interrupt" });
     }
     return;
@@ -2438,9 +2621,23 @@ function openRoundTable(): void {
     closePopover();
     return;
   }
-  popover = { kind: "roundtable", options: null, selected: [], mode: "review", error: null, note: null };
+  const text = composer.value.trim();
+  popover = parkedSheet ?? {
+    kind: "roundtable",
+    options: null,
+    selected: [],
+    mode: tableMode,
+    error: null,
+    note: null,
+    motion: text,
+    prefill: text,
+    filter: "",
+    pending: null,
+  };
+  parkedSheet = null;
   renderPopover();
-  vscode.postMessage({ type: "requestRoundTableOptions" });
+  document.getElementById("rt-motion")?.focus();
+  if (!popover.options) vscode.postMessage({ type: "requestRoundTableOptions" });
 }
 
 function onAttachItem(item: string): void {
@@ -2563,66 +2760,91 @@ function flashCopied(button: HTMLElement): void {
   }, 1200);
 }
 
-/** Seat the models (the suggested three are ticked), pick review or team, and start on what is in the composer. */
+const TABLE_MODES: { id: RoundTableMode; label: string; icon: string; detail: string }[] = [
+  { id: "review", label: "Review", icon: icons.table, detail: "Each model answers blind, they critique and rank each other, the leader writes the verdict." },
+  { id: "team", label: "Team", icon: icons.agent, detail: "The leader splits the task, each part goes to the model best at it, then it is reviewed and merged." },
+  { id: "code", label: "Code review", icon: icons.search, detail: "Every model reviews your changes blind, they vote on each other's findings, and only what they agree on is shown." },
+];
+
+/** Review and code review compare models, so they need two; a team can be one model working alone. */
+function seatsNeeded(mode: RoundTableMode): number {
+  return mode === "team" ? 1 : 2;
+}
+
+function newRequestId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+/** The sheet whose start `requestId` answers, open or parked. */
+function sheetWaitingFor(requestId: string): Extract<Popover, { kind: "roundtable" }> | null {
+  if (popover?.kind === "roundtable" && popover.pending === requestId) return popover;
+  return parkedSheet?.pending === requestId ? parkedSheet : null;
+}
+
+/** The start sheet: how the table works, what it works on, and who sits at it. */
 function roundTableSheet(pop: Extract<Popover, { kind: "roundtable" }>): string {
-  const modes = `
-    <div class="rt-modes" role="radiogroup" aria-label="How the table works">
-      <button type="button" class="rt-mode${pop.mode === "review" ? " on" : ""}" data-rt-mode="review" role="radio" aria-checked="${pop.mode === "review"}">
-        <span>${icons.eyeSmall} Anonymous review</span><small>Every model answers blind, critiques the others by letter and ranks them. The leader writes the verdict.</small>
-      </button>
-      <button type="button" class="rt-mode${pop.mode === "team" ? " on" : ""}" data-rt-mode="team" role="radio" aria-checked="${pop.mode === "team"}">
-        <span>${icons.agent} Team</span><small>The leader splits the task, each part goes to the model best at it, and the work is reviewed and merged.</small>
-      </button>
-    </div>`;
   const head = `<div class="rt-sheet-head"><span class="rt-sheet-title">${icons.table}<span>Round table</span></span>
     <button class="tool icon-only" type="button" data-rt-close aria-label="Close">${icons.close}</button></div>`;
-
   if (!pop.options) {
-    return `<div class="rt-sheet">${head}${tableDiagram([], { title: "Round table", subtitle: "Finding models…", minSeats: 4 })}<div class="pop-loading">${sparkle("Loading", 14)}<span>Finding the models you can seat…</span></div></div>`;
+    return `<div class="rt-sheet">${head}<div class="pop-loading">${sparkle("Loading", 14)}<span>Finding the models you can seat…</span></div></div>`;
   }
   if (pop.options.length === 0) {
-    return `<div class="rt-sheet">${head}${tableDiagram([], { title: "No models yet", minSeats: 4 })}
-      <div class="rt-empty">
+    return `<div class="rt-sheet">${head}
+      <div class="rt-sheet-empty">
         <p>${escapeHtml(pop.error ?? "Sign in to Ditfa or add an API key to seat models at the table.")}</p>
         <button class="primary large" type="button" data-sign-in>${icons.sparkles}<span>Sign in with Ditfa</span></button>
         <button class="link" type="button" data-change-provider>Add an API key or a local model</button>
       </div></div>`;
   }
 
-  const seated = pop.selected
-    .map((ref) => pop.options?.find((option) => option.ref === ref))
-    .filter((option): option is RoundTableOption => Boolean(option));
-  const leader = [...seated].sort((a, b) => b.score - a.score)[0];
-  const seats: Seat[] = seated.map((option) => ({
-    key: option.ref,
-    name: option.label,
-    detail: option.providerLabel,
-    leader: option.ref === leader?.ref,
-    attrs: ` data-rt-unseat="${escapeHtml(option.ref)}"`,
-    label: `Remove ${option.label} from the table`,
-  }));
-  const diagram = tableDiagram(seats, {
-    title: pop.mode === "review" ? "Review" : "Team",
-    subtitle: seated.length ? `${seated.length} at the table` : "Pick the models",
-    minSeats: 4,
-  });
+  const modes = `<div class="rt-modes" role="radiogroup" aria-label="How the table works">${TABLE_MODES.map(
+    (mode) => `<button type="button" class="rt-mode${pop.mode === mode.id ? " on" : ""}" data-rt-mode="${mode.id}" role="radio"
+      aria-checked="${pop.mode === mode.id}" tabindex="${pop.mode === mode.id ? 0 : -1}">
+      <span class="rt-mode-name">${mode.icon}<span>${mode.label}</span></span><small>${escapeHtml(mode.detail)}</small></button>`,
+  ).join("")}</div>`;
 
+  const code = pop.mode === "code";
+  const field = `<div class="rt-field">
+      <label class="rt-field-label" for="rt-motion">${code ? "Focus (optional)" : "Request"}</label>
+      <textarea id="rt-motion" rows="3" dir="auto" placeholder="${code ? "For example: check the error handling in the auth changes" : "A question, an idea or a task for the team"}"
+        aria-describedby="rt-motion-note"${pop.note ? ' aria-invalid="true"' : ""}></textarea>
+      <p class="rt-field-note" id="rt-motion-note">${
+        pop.note
+          ? `<span class="rt-problem" role="alert">${icons.warn}<span>${escapeHtml(pop.note)}</span></span>`
+          : code
+            ? "Reviews your uncommitted changes with every seated model."
+            : `<kbd>${isMac() ? "⌘" : "Ctrl"}</kbd>+<kbd>Enter</kbd> starts the table.`
+      }</p>
+    </div>`;
+
+  const leader = pop.selected
+    .map((ref) => pop.options?.find((option) => option.ref === ref))
+    .filter((option): option is RoundTableOption => Boolean(option))
+    .sort((a, b) => b.score - a.score)[0];
+  const full = pop.selected.length >= MAX_ROUNDTABLE_PARTICIPANTS;
+  const filter = pop.filter.trim().toLowerCase();
+  const shown = pop.options.filter(
+    (option) =>
+      !filter ||
+      option.label.toLowerCase().includes(filter) ||
+      option.providerLabel.toLowerCase().includes(filter) ||
+      option.strengths.some((strength) => strength.toLowerCase().includes(filter)),
+  );
   const groups = new Map<string, RoundTableOption[]>();
-  for (const option of pop.options.slice(0, 60)) {
+  for (const option of shown.slice(0, 80)) {
     groups.set(option.providerLabel, [...(groups.get(option.providerLabel) ?? []), option]);
   }
   const list = [...groups.entries()]
     .map(
-      ([provider, options]) => `<div class="rt-group"><div class="pop-heading">${escapeHtml(provider)}</div>${options
+      ([provider, options]) => `<div class="rt-group" role="group" aria-label="${escapeHtml(provider)}"><div class="pop-heading">${escapeHtml(provider)}</div>${options
         .map((option) => {
           const on = pop.selected.includes(option.ref);
-          return `
-          <label class="rt-option${on ? " on" : ""}" style="--seat:${seatColor(option.ref)}">
-            <input type="checkbox" data-rt-pick="${escapeHtml(option.ref)}" ${on ? "checked" : ""} />
-            <span class="rt-option-avatar">${escapeHtml(seatInitials(option.label))}</span>
-            <span class="pop-text"><span>${escapeHtml(option.label)}${leader?.ref === option.ref ? ' <span class="rt-leader">Leader</span>' : ""}</span>
-              <small>${option.strengths.length ? escapeHtml(option.strengths.join(" · ")) : escapeHtml(option.providerLabel)}</small></span>
-            <span class="rt-score" title="Estimated overall strength">${whole(option.score)}</span>
+          const locked = !on && full;
+          return `<label class="rt-option${on ? " on" : ""}${locked ? " off" : ""}" style="--seat:${seatColor(option.ref)}">
+            <input type="checkbox" data-rt-pick="${escapeHtml(option.ref)}" ${on ? "checked" : ""}${locked ? " disabled" : ""} />
+            <span class="rt-option-avatar" aria-hidden="true">${on ? icons.check : escapeHtml(seatInitials(option.label))}</span>
+            <span class="pop-text"><span>${escapeHtml(option.label)}${leader?.ref === option.ref ? ' <span class="rt-badge">Leader</span>' : ""}</span>
+              <small>${escapeHtml(option.strengths.length ? option.strengths.slice(0, 3).join(" · ") : option.providerLabel)}</small></span>
           </label>`;
         })
         .join("")}</div>`,
@@ -2630,69 +2852,102 @@ function roundTableSheet(pop: Extract<Popover, { kind: "roundtable" }>): string 
     .join("");
 
   const count = pop.selected.length;
-  const enough = pop.mode === "review" ? count >= 2 : count >= 1;
-  const need = pop.mode === "review" && count < 2 ? `Seat ${whole(2 - count)} more model${2 - count === 1 ? "" : "s"} for a review.` : "";
+  const need = seatsNeeded(pop.mode);
+  const hint =
+    count < need
+      ? `Seat ${whole(need - count)} more model${need - count === 1 ? "" : "s"} for ${code ? "a code review" : pop.mode === "team" ? "a team" : "a review"}.`
+      : full
+        ? `${whole(count)} seated, the most a table takes.`
+        : leader
+          ? `${whole(count)} seated · ${leader.label} leads.`
+          : `${whole(count)} seated.`;
+  const busy = pop.pending !== null;
+  const search =
+    pop.options.length > 8
+      ? `<div class="pop-search-row rt-search">${icons.search}<input class="pop-search" id="rt-filter" type="search" placeholder="Search models" aria-label="Search models" value="${escapeHtml(pop.filter)}" /></div>`
+      : "";
   return `
-    <div class="rt-sheet">
+    <div class="rt-sheet" role="group" aria-label="Start a round table">
       ${head}
-      ${diagram}
       ${modes}
-      <div class="pop-scroll rt-options">${list}
+      ${field}
+      <div class="rt-seats-head"><span>Models</span><span class="rt-count">${whole(count)} of ${whole(MAX_ROUNDTABLE_PARTICIPANTS)}</span></div>
+      ${search}
+      <div class="rt-options" id="rt-options">${list || `<div class="pop-note">No models match “${escapeHtml(pop.filter)}”.</div>`}
         <button class="link rt-more" type="button" data-change-provider>${icons.plus} Add models from another provider</button>
       </div>
-      ${pop.note ? `<div class="pop-note">${escapeHtml(pop.note)}</div>` : ""}
       <div class="rt-start-row">
-        <span class="rt-hint">${escapeHtml(need || "The question is what you typed in the box.")}</span>
-        <button class="primary small" type="button" data-rt-start ${enough ? "" : "disabled"}>${icons.play}<span>Start</span></button>
+        <span class="rt-hint">${escapeHtml(hint)}</span>
+        <button class="primary small" type="button" data-rt-start ${count < need || busy ? "disabled" : ""}${busy ? ' aria-busy="true"' : ""}>${
+          busy ? `${sparkle("Starting", 12)}<span>Starting…</span>` : `${icons.play}<span>Start</span>`
+        }</button>
       </div>
     </div>`;
 }
 
+/** Re-draws the sheet without losing the typed request, the list's scroll or the focused control. */
+function renderTableSheet(host: HTMLElement, pop: Extract<Popover, { kind: "roundtable" }>): void {
+  const active = document.activeElement as HTMLElement | null;
+  const focus = active && host.contains(active)
+    ? active.id
+      ? `#${active.id}`
+      : active.dataset.rtPick
+        ? `[data-rt-pick="${CSS.escape(active.dataset.rtPick)}"]`
+        : active.dataset.rtMode
+          ? `[data-rt-mode="${active.dataset.rtMode}"]`
+          : null
+    : null;
+  const selection = active instanceof HTMLTextAreaElement || active instanceof HTMLInputElement ? [active.selectionStart, active.selectionEnd] : null;
+  const scrolled = host.querySelector("#rt-options")?.scrollTop ?? 0;
+  host.innerHTML = roundTableSheet(pop);
+  const motion = host.querySelector<HTMLTextAreaElement>("#rt-motion");
+  if (motion) motion.value = pop.motion;
+  const options = host.querySelector("#rt-options");
+  if (options) options.scrollTop = scrolled;
+  const next = focus ? host.querySelector<HTMLElement>(focus) : null;
+  next?.focus({ preventScroll: true });
+  if (selection && (next instanceof HTMLTextAreaElement || next instanceof HTMLInputElement)) {
+    next.setSelectionRange(selection[0] ?? null, selection[1] ?? null);
+  }
+}
+
+function startTable(pop: Extract<Popover, { kind: "roundtable" }>): void {
+  if (pop.pending || pop.selected.length < seatsNeeded(pop.mode)) return;
+  const problem = motionProblem(pop.motion, pop.mode);
+  if (problem) {
+    pop.note = problem;
+    renderPopover();
+    document.getElementById("rt-motion")?.focus();
+    return;
+  }
+  pop.note = null;
+  pop.pending = newRequestId();
+  // Kept aside at once: typing @ or / or opening another menu replaces the popover, and the answer must still find it.
+  parkedSheet = pop;
+  vscode.postMessage({ type: "startRoundTable", requestId: pop.pending, motion: pop.motion.trim(), mode: pop.mode, participants: pop.selected });
+  renderPopover();
+}
+
 function onRoundTableClick(hit: (selector: string) => HTMLElement | null): boolean {
   const pop = popover?.kind === "roundtable" ? popover : null;
+  if (!pop) return false;
   const pick = hit("[data-rt-pick]") as HTMLInputElement | null;
-  const mode = hit("[data-rt-mode]")?.dataset.rtMode as "review" | "team" | undefined;
-  const stop = hit("[data-rt-stop]")?.dataset.rtStop;
-  const action = hit("[data-rt-action]");
-  const unseat = hit("[data-rt-unseat]")?.dataset.rtUnseat;
-  if (pop && unseat) {
-    pop.selected = pop.selected.filter((item) => item !== unseat);
-    renderPopover();
-    return true;
-  }
-  if (pop && hit("[data-rt-close]")) {
+  const mode = hit("[data-rt-mode]")?.dataset.rtMode as RoundTableMode | undefined;
+  if (hit("[data-rt-close]")) {
     closePopover();
-    return true;
-  }
-  if (pop && pick) {
+    composer.focus();
+  } else if (pick) {
     const ref = pick.dataset.rtPick ?? "";
-    pop.selected = pick.checked ? [...new Set([...pop.selected, ref])] : pop.selected.filter((item) => item !== ref);
+    const next = pick.checked ? [...new Set([...pop.selected, ref])] : pop.selected.filter((item) => item !== ref);
+    pop.selected = next.slice(0, MAX_ROUNDTABLE_PARTICIPANTS);
     renderPopover();
-  } else if (pop && mode) {
+  } else if (mode) {
     pop.mode = mode;
+    tableMode = mode;
+    pop.note = null;
     renderPopover();
-  } else if (pop && hit("[data-rt-start]")) {
-    const motion = composer.value.trim();
-    if (!motion) {
-      pop.note = "Write the question or task in the box first.";
-      renderPopover();
-      composer.focus();
-      return true;
-    }
-    vscode.postMessage({ type: "startRoundTable", motion, mode: pop.mode, participants: pop.selected });
-    composer.value = "";
-    autoGrow();
-    saveDraft();
-    closePopover();
-    renderToolbar();
-  } else if (stop) {
-    vscode.postMessage({ type: "stopRoundTable", entryId: stop });
-  } else if (action) {
-    vscode.postMessage({
-      type: "roundTableAction",
-      entryId: action.dataset.rtEntry ?? "",
-      action: action.dataset.rtAction as "implement" | "copy" | "save",
-    });
+  } else if (hit("[data-rt-start]")) {
+    startTable(pop);
   } else {
     return false;
   }

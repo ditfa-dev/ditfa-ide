@@ -213,10 +213,25 @@ export interface McpServer {
   error?: string;
 }
 
+/**
+ * What Ditfa (the web app, the desktop app, Ditfa Code's own agent) may do with this editor's terminals through the
+ * device bridge. `off`: nothing, no connection. `ask`: read freely, ask before every command. `allow`: read and run.
+ */
+export type TerminalAccess = "off" | "ask" | "allow";
+
+/**
+ * The device bridge's connection, read-only. `standby`: another window with the same folder holds the connection;
+ * this one takes over when it is focused. `refused`: Ditfa refused this editor's key (`terminalBridgeError` says why).
+ */
+export type TerminalBridgeState = "off" | "signedOut" | "connecting" | "connected" | "standby" | "refused";
+
 export interface McpSettings {
   servers: McpServer[];
   /** The Ditfa account's own tools: web search, media and connected apps. */
   ditfaTools: { connected: boolean; endpoint?: string };
+  terminalAccess: TerminalAccess;
+  terminalBridge: TerminalBridgeState;
+  terminalBridgeError?: string;
 }
 
 export interface SkillInfo {
@@ -256,20 +271,22 @@ export interface SettingsSnapshot {
 }
 
 /** The snapshot groups whose fields the panel edits. */
-type EditableGroups = Pick<SettingsSnapshot, "agent" | "completion" | "voice" | "roundtable" | "features">;
+type EditableGroups = Pick<SettingsSnapshot, "agent" | "completion" | "voice" | "roundtable" | "features" | "mcp">;
 
 /**
  * Every field the panel can edit, as `group.field`: "agent.permission",
  * "completion.enabled", "features.chat" and so on. Derived from the snapshot
  * types, so a new field is editable, and must be validated, from the day it
- * is added. `voice.voices` is the one read-only field in these groups.
+ * is added. `voice.voices` is the one read-only field in these groups; of `mcp`, only `terminalAccess` is a
+ * setting (servers change through actions).
  */
 export type SettingKey =
   | `agent.${keyof AgentSettings}`
   | `completion.${keyof CompletionSettings}`
   | `voice.${Exclude<keyof VoiceSettings, "voices">}`
   | `roundtable.${keyof RoundtableSettings}`
-  | `features.${FeatureKey}`;
+  | `features.${FeatureKey}`
+  | "mcp.terminalAccess";
 
 /** The value a key takes: the type of the snapshot field it edits. */
 export type SettingValue<K extends SettingKey> = K extends `${infer G extends keyof EditableGroups}.${infer F}`

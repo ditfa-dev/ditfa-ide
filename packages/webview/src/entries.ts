@@ -6,11 +6,10 @@ import type {
   CommandEntry,
   FileChangeEntry,
   FileChangeSummary,
-  RoundTableEntry,
 } from "@ditfa-ide/contract";
-import { icons, sparkle } from "./icons";
-import { escapeHtml, renderMarkdown, stripAnsi, token, whole } from "./markdown";
-import { seatColor, seatInitials, tableDiagram, type Seat } from "./roundtableView";
+import { icons } from "./icons";
+import { escapeHtml, formatTokens, renderMarkdown, stripAnsi, token, whole } from "./markdown";
+import { cardTree, newCardState, renderEl } from "./roundtableView";
 
 /**
  * Pure rendering of transcript rows and approval cards. Everything that comes
@@ -156,8 +155,13 @@ export function renderEntry(entry: ChatEntry, ctx: RenderContext): string | null
     case "notice":
       return `<div class="notice notice-${token(entry.tone)}">${escapeHtml(entry.text)}</div>`;
 
-    case "roundtable":
-      return renderRoundTable(entry, ctx);
+    case "roundtable": {
+      // The chat mounts a live RoundTableCard instead; this static copy serves everything else.
+      const blocks: string[] = [];
+      const html = renderEl(cardTree(entry, newCardState(), Date.now(), `rt-${token(entry.id)}`, blocks));
+      ctx.codeBlocks.set(entry.id, blocks);
+      return html;
+    }
 
     case "error": {
       const action = entry.action ? ERROR_ACTIONS[entry.action] : null;
@@ -170,147 +174,6 @@ export function renderEntry(entry: ChatEntry, ctx: RenderContext): string | null
     }
   }
 }
-
-const SUBTASK_STATUS: Record<string, string> = {
-  pending: "waiting",
-  running: "working",
-  reviewing: "in review",
-  revising: "revising",
-  done: "done",
-  failed: "failed",
-};
-
-/** The last part of a lane's text: lanes stream, and the newest lines are the ones worth watching. */
-function laneTail(text: string, max = 900): string {
-  const trimmed = text.trim();
-  return trimmed.length > max ? `…${trimmed.slice(-max)}` : trimmed;
-}
-
-/**
- * The round table as one card: a live lane per model, the plan and who took each part (team mode), the peer
- * ranking (review mode), and the leader's final answer with the way to act on it.
- */
-function renderRoundTable(entry: RoundTableEntry, ctx: RenderContext): string {
-  const running = entry.status === "running";
-  const id = escapeHtml(entry.id);
-  const seatKey = (lane: RoundTableEntry["lanes"][number]) => `${lane.provider}:${lane.model}`;
-  const laneName = (lane: RoundTableEntry["lanes"][number]) =>
-    entry.revealed || lane.label.length > 2 ? lane.label : `Model ${lane.label}`;
-
-  const seats: Seat[] = entry.lanes.map((lane) => ({
-    key: seatKey(lane),
-    name: laneName(lane),
-    detail: lane.status === "thinking" ? lane.task : entry.revealed && lane.label !== lane.model ? lane.model : lane.provider,
-    leader: lane.isLeader,
-    status: lane.status,
-    attrs: ` data-toggle="${escapeHtml(`rt:${entry.id}:${lane.participantId}`)}" data-toggle-entry="${id}"`,
-    label: `Show what ${laneName(lane)} wrote`,
-  }));
-  const diagram = tableDiagram(seats, {
-    title: entry.mode === "review" ? "Review" : "Team",
-    subtitle: running ? entry.phase : STATUS_LABEL[entry.status] ?? entry.phase,
-  });
-
-  const lanes = entry.lanes
-    .map((lane) => {
-      const key = `rt:${entry.id}:${lane.participantId}`;
-      const open = ctx.expanded.has(key);
-      const text = lane.text.trim();
-      const body = open ? text : laneTail(lane.text);
-      const long = text.length > body.length;
-      const status =
-        lane.status === "thinking"
-          ? `<span class="rt-msg-status">${sparkle("Thinking", 11)}<span>${escapeHtml(lane.task || "Thinking")}</span></span>`
-          : lane.status === "failed"
-            ? `<span class="rt-msg-status failed">Failed</span>`
-            : lane.status === "done"
-              ? `<span class="rt-msg-status done">${escapeHtml(lane.task || "Done")}${lane.outputTokens ? ` · ${formatTokens(lane.outputTokens)}` : ""}</span>`
-              : `<span class="rt-msg-status">Waiting</span>`;
-      return `
-        <div class="rt-msg rt-${token(lane.status)}${lane.isLeader ? " leader" : ""}" style="--seat:${seatColor(seatKey(lane))}">
-          <span class="rt-msg-avatar" aria-hidden="true">${escapeHtml(seatInitials(laneName(lane)))}</span>
-          <div class="rt-msg-main">
-            <div class="rt-msg-head">
-              <span class="rt-msg-name" title="${entry.revealed ? escapeHtml(`${lane.model} · ${lane.provider}`) : "Anonymous until the table ends"}">${escapeHtml(laneName(lane))}</span>
-              ${lane.isLeader ? `<span class="rt-leader" title="The strongest model at the table leads it">Leader</span>` : ""}
-              ${status}
-            </div>
-            ${body ? `<div class="rt-msg-bubble" dir="auto">${escapeHtml(body)}</div>` : lane.status === "waiting" ? "" : `<div class="rt-msg-bubble empty">${sparkle("Thinking", 11)}</div>`}
-            ${long || open ? `<button class="rt-msg-more" type="button" data-toggle="${escapeHtml(key)}" data-toggle-entry="${id}" aria-expanded="${open}">${open ? "Show less" : "Show all"}</button>` : ""}
-            ${lane.error ? `<div class="rt-error">${escapeHtml(lane.error)}</div>` : ""}
-          </div>
-        </div>`;
-    })
-    .join("");
-
-  const subtasks = entry.subtasks.length
-    ? `<div class="rt-section"><div class="rt-section-title">Work split</div><ol class="rt-subtasks">${entry.subtasks
-        .map(
-          (subtask) => `
-          <li class="rt-st-${token(subtask.status)}">
-            <span class="rt-st-title" dir="auto">${escapeHtml(subtask.title)}</span>
-            <small>${escapeHtml(subtask.assignee ?? "unassigned")}${subtask.reason ? ` · ${escapeHtml(subtask.reason)}` : ""}</small>
-            <span class="rt-st-status">${escapeHtml(SUBTASK_STATUS[subtask.status] ?? subtask.status)}</span>
-          </li>`,
-        )
-        .join("")}</ol></div>`
-    : "";
-
-  const top = Math.max(1, ...entry.rankings.map((ranking) => ranking.score));
-  const rankings = entry.rankings.length
-    ? `<div class="rt-section"><div class="rt-section-title">Peer ranking</div><div class="rt-ranks">${entry.rankings
-        .map(
-          (ranking, index) => `<div class="rt-rank-row">
-            <span class="rt-rank-place">${whole(index + 1)}</span>
-            <span class="rt-rank-name">${escapeHtml(ranking.label)}</span>
-            <span class="rt-rank-bar"><span style="width:${Math.max(6, Math.round((ranking.score / top) * 100))}%"></span></span>
-            <span class="rt-rank-score">${whole(ranking.score)}</span>
-          </div>`,
-        )
-        .join("")}</div></div>`
-    : "";
-
-  let final = "";
-  if (entry.final.trim()) {
-    const rendered = renderMarkdown(entry.final);
-    ctx.codeBlocks.set(entry.id, rendered.codeBlocks);
-    const leader = entry.lanes.find((lane) => lane.isLeader);
-    final = `<div class="rt-final">
-      <div class="rt-final-head">${icons.sparkles}<span>${entry.mode === "team" ? "What the team delivered" : "The table's answer"}</span>${leader ? `<span class="rt-final-by">by ${escapeHtml(laneName(leader))}</span>` : ""}</div>
-      <div class="markdown" dir="auto">${rendered.html}</div></div>`;
-  }
-
-  const actions = running
-    ? ""
-    : `<div class="rt-actions">
-        ${entry.final.trim() ? `<button class="primary small" type="button" data-rt-action="implement" data-rt-entry="${id}">${icons.play}<span>Implement with the agent</span></button><button class="ghost-button" type="button" data-rt-action="copy" data-rt-entry="${id}">${icons.copy}<span>Copy</span></button>` : ""}
-        <button class="ghost-button" type="button" data-rt-action="save" data-rt-entry="${id}">${icons.save}<span>Save report</span></button>
-        <span class="rt-usage">${formatTokens(entry.usage.outputTokens)} tokens${entry.usage.estimated ? " (estimated)" : ""}</span>
-      </div>`;
-
-  return `
-    <div class="rt-card rt-${token(entry.status)}">
-      <div class="rt-head">
-        <span class="rt-icon">${icons.table}</span>
-        <span class="rt-title">Round table · ${entry.mode === "review" ? "anonymous review" : "team"}</span>
-        <span class="rt-phase">${running ? sparkle("Working", 12) : ""}${escapeHtml(entry.phase)}</span>
-        ${running ? `<button class="ghost-button" type="button" data-rt-stop="${id}">${icons.stop}<span>Stop</span></button>` : ""}
-      </div>
-      <blockquote class="rt-motion" dir="auto">${escapeHtml(entry.motion)}</blockquote>
-      ${diagram}
-      <div class="rt-conversation">${lanes}</div>
-      ${subtasks}
-      ${rankings}
-      ${final}
-      ${actions}
-    </div>`;
-}
-
-const STATUS_LABEL: Record<string, string> = {
-  completed: "Done",
-  stopped: "Stopped",
-  failed: "Failed",
-};
 
 const ERROR_ACTIONS = {
   signIn: "Set up access",
@@ -608,17 +471,6 @@ export function formatDuration(value: number): string {
     return `${(ms / 1000).toFixed(1)}s`;
   }
   return `${Math.floor(ms / 60_000)}m ${Math.round((ms % 60_000) / 1000)}s`;
-}
-
-export function formatTokens(value: number): string {
-  const count = whole(value);
-  if (count < 1000) {
-    return String(count);
-  }
-  if (count < 1_000_000) {
-    return `${(count / 1000).toFixed(1)}k`;
-  }
-  return `${(count / 1_000_000).toFixed(2)}M`;
 }
 
 /** Terminal output can be enormous; only the tail is interesting while scanning. */

@@ -239,6 +239,8 @@ function open(id: string | undefined): void {
   confirmingRemoval = null;
   render();
   content.scrollTop = 0;
+  // In a narrow editor the sections are a strip that scrolls sideways: keep the open one in sight.
+  nav.querySelector(".nav-item.active")?.scrollIntoView({ block: "nearest", inline: "nearest" });
 }
 
 function edit<K extends SettingKey>(key: K, value: SettingValue<K>): void {
@@ -289,11 +291,6 @@ function onClick(event: MouseEvent): void {
     return;
   }
 
-  const freeSeat = hit("[data-participant-remove]")?.dataset.participantRemove;
-  if (freeSeat !== undefined) {
-    toggleParticipant(freeSeat, false);
-    return;
-  }
   const keyOpen = hit("[data-key-open]")?.dataset.keyOpen;
   if (keyOpen) {
     openKeyForm(keyOpen);

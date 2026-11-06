@@ -3,8 +3,8 @@ import type { BordaScore, Ranking } from "./types";
 
 /**
  * Reads a ranking of anonymous labels out of a model's answer: JSON first
- * (`{"ranking": ["B", "A"]}` or a bare array), then labels in the order they
- * first appear as whole words. Labels outside `allowed` (the ranker's own, or
+ * (`{"ranking": ["B", "A"]}` or a bare array), then letters that stand in a
+ * ranking position ("1. B", "B > C", "Proposal B", a quoted "B"). Labels outside `allowed` (the ranker's own, or
  * invented ones) are dropped. Returns null when nothing usable is left.
  */
 export function parseRanking(text: string, allowed: readonly string[]): string[] | null {
@@ -16,7 +16,7 @@ export function parseRanking(text: string, allowed: readonly string[]): string[]
   if (Array.isArray(list)) {
     labels = list.filter((item): item is string => typeof item === "string").map(normalize);
   } else {
-    labels = [...text.matchAll(/(?<![\p{L}\p{N}])([A-Z]{1,2})(?![\p{L}\p{N}])/gu)].map((match) => match[1] ?? "");
+    labels = positionalLabels(text);
   }
 
   const order: string[] = [];
@@ -26,6 +26,24 @@ export function parseRanking(text: string, allowed: readonly string[]): string[]
     }
   }
   return order.length > 0 ? order : null;
+}
+
+/**
+ * Letters in prose, but only where a ranking puts them: a bare capital is too often the article "A" or a word
+ * such as "I" to count by itself.
+ */
+function positionalLabels(text: string): string[] {
+  const patterns = [
+    /^[ \t]*(?:\d+[.)]|#\d+:?|[-*])[ \t]*(?:\*\*)?(?:proposal[ \t]+)?([A-Z]{1,2})(?![\p{L}\p{N}])/gimu,
+    /\bproposal[ \t]+([A-Z]{1,2})(?![\p{L}\p{N}])/giu,
+    /["'`]([A-Z]{1,2})["'`]/gu,
+    /(?<![\p{L}\p{N}])([A-Z]{1,2})[ \t]*(?=>)/gu,
+    /(?<=>)[ \t]*([A-Z]{1,2})(?![\p{L}\p{N}])/gu,
+  ];
+  const found = patterns.flatMap((pattern) =>
+    [...text.matchAll(pattern)].map((match) => ({ at: (match.index ?? 0) + match[0].indexOf(match[1] ?? ""), label: match[1] ?? "" })),
+  );
+  return found.sort((a, b) => a.at - b.at).map((item) => item.label.toUpperCase());
 }
 
 /** `"Proposal B"` and `" b "` both mean B. */

@@ -11,9 +11,11 @@ import { fileURLToPath } from "node:url";
 const DIST = resolve(dirname(fileURLToPath(import.meta.url)), "../dist");
 
 const BUDGETS = {
-  "extension.js": 260_000,
-  "webview.js": 110_000,
-  "webview.css": 54_000,
+  // +60 KB in 0.7.0 for the device bridge: `ws` (~48 KB) and the terminal tools.
+  "extension.js": 345_000,
+  // +10 KB JS and +6 KB CSS for the round table's team run card, start sheet and code review findings.
+  "webview.js": 120_000,
+  "webview.css": 60_000,
   "settings.js": 70_000,
   "settings.css": 28_000,
 };

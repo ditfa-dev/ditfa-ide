@@ -363,16 +363,25 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
         break;
       }
 
-      case "startRoundTable":
-        await controller.roundTable.start(message.motion, message.mode, message.participants);
+      case "startRoundTable": {
+        // Answered as soon as the card is up (or with why it cannot start); the table runs on in the background.
+        const result = await controller.roundTable
+          .start(message.motion, message.mode, message.participants)
+          .catch((error: unknown) => ({ ok: false as const, reason: error instanceof Error ? error.message : String(error) }));
+        this.post(
+          result.ok
+            ? { type: "roundTableStarted", requestId: message.requestId, entryId: result.entryId }
+            : { type: "roundTableRejected", requestId: message.requestId, reason: result.reason },
+        );
         break;
+      }
 
       case "stopRoundTable":
         controller.roundTable.stop(message.entryId);
         break;
 
       case "roundTableAction":
-        await controller.roundTable.action(message.entryId, message.action);
+        await controller.roundTable.action(message.entryId, message.action, message.findingId);
         break;
 
       case "voiceStart":

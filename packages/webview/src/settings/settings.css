@@ -4,8 +4,6 @@
  * means something: the mark, the main calls to action and the usage bars, and
  * high-contrast themes trade even those for the theme's own contrast colors.
  */
-@import "../roundtable.css";
-
 :root {
   --ditfa-sky: #7cc0ec;
   --ditfa-blue: #4f94c5;
@@ -116,16 +114,22 @@ kbd,
 /* Layout */
 .layout {
   display: grid;
-  grid-template-columns: 240px minmax(0, 1fr);
+  grid-template-columns: minmax(180px, 240px) minmax(0, 1fr);
   height: 100%;
 }
+/* Brand and search stay put; only the section list scrolls on short screens. */
 .sidebar {
   display: flex;
   flex-direction: column;
   gap: 14px;
+  min-height: 0;
   padding: 20px 12px;
   background: var(--sidebar);
   border-inline-end: 1px solid var(--border);
+}
+#nav {
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
 }
 .brand {
@@ -489,8 +493,8 @@ kbd,
   font: inherit;
 }
 .select {
-  min-width: 220px;
-  max-width: 320px;
+  width: min(320px, 100%);
+  min-width: min(220px, 100%);
   border: 1px solid var(--vscode-dropdown-border, var(--input-border));
   background: var(--vscode-dropdown-background, var(--input-bg));
   color: var(--vscode-dropdown-foreground, var(--input-fg));
@@ -530,8 +534,7 @@ kbd,
 
 /* Radios: segments and cards. The native radio stays focusable, so arrow keys work. */
 .segment input,
-.choice-card input,
-.pick input {
+.choice-card input {
   position: absolute;
   width: 1px;
   height: 1px;
@@ -626,44 +629,11 @@ kbd,
   font-size: 12px;
 }
 
-/* Participant picks and language tags */
-.picks,
+/* Language tags */
 .tags {
   display: flex;
   flex-wrap: wrap;
   gap: 6px;
-}
-.pick {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  height: 28px;
-  padding: 0 12px;
-  border: 1px solid var(--border);
-  border-radius: 14px;
-  background: var(--bg);
-  cursor: pointer;
-}
-.pick:hover {
-  border-color: var(--option-border);
-}
-.pick.on {
-  border-color: var(--option-border);
-  background: var(--option-bg);
-  color: var(--option-fg);
-}
-.pick.off {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-.pick:has(input:focus-visible) {
-  outline: 1px solid var(--focus);
-  outline-offset: 2px;
-}
-.pick .icon {
-  width: 13px;
-  height: 13px;
 }
 .tag {
   display: inline-flex;
@@ -1298,7 +1268,7 @@ body.vscode-high-contrast-light .moving-lines {
 /* Narrow editors: the section list becomes a strip along the top. */
 @media (max-width: 720px) {
   .layout {
-    grid-template-columns: 1fr;
+    grid-template-columns: minmax(0, 1fr);
     grid-template-rows: auto minmax(0, 1fr);
   }
   .sidebar {
@@ -1311,11 +1281,15 @@ body.vscode-high-contrast-light .moving-lines {
   .brand {
     display: none;
   }
+  #nav {
+    overflow: visible;
+  }
   .nav-list {
     flex-direction: row;
     gap: 4px;
     overflow-x: auto;
     padding-bottom: 2px;
+    scrollbar-width: thin;
   }
   .nav-item {
     width: auto;
@@ -1351,59 +1325,143 @@ body.vscode-high-contrast-light .moving-lines {
   }
 }
 
-/* Round table: the table and who can join it */
-.round-table-editor {
-  display: flex;
-  flex-direction: column;
-  gap: 14px;
+/* Round table: who sits at it, one row per model */
+.roster {
+  container-type: inline-size;
   margin-top: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  overflow: hidden;
 }
-.round-table-editor .rt-table {
-  --bg: var(--vscode-editor-background);
+.roster-table {
+  width: 100%;
+  border-collapse: collapse;
 }
-.pick-group {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-.pick-group-title {
+.roster-table th {
+  padding: 6px 12px;
+  border-bottom: 1px solid var(--border);
   color: var(--muted);
   font-size: 11px;
   font-weight: 600;
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
+  text-align: start;
 }
-.seat-pick {
-  gap: 7px;
-  padding-inline-start: 4px;
+.roster-table td {
+  padding: 6px 12px;
+  vertical-align: middle;
 }
-.seat-pick input {
-  position: absolute;
-  opacity: 0;
-  pointer-events: none;
+.roster-table tbody tr + tr td {
+  border-top: 1px solid var(--border);
 }
-.seat-pick-avatar {
+.roster-table tr.on {
+  background: var(--selected);
+}
+.roster-table tr.off .roster-model-cell,
+.roster-table tr.off .roster-strengths-cell {
+  opacity: 0.6;
+}
+.roster-model {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+.roster-avatar {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border: 1.5px solid var(--seat);
   border-radius: 50%;
-  border: 1.5px solid color-mix(in srgb, var(--seat) 60%, transparent);
-  color: var(--seat);
-  font-size: 9px;
+  background: color-mix(in srgb, var(--seat) 18%, transparent);
+  font-size: 9.5px;
   font-weight: 700;
 }
-.seat-pick.on {
-  border-color: var(--seat);
-  background: color-mix(in srgb, var(--seat) 12%, transparent);
+.roster-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
 }
-.seat-pick.on .seat-pick-avatar {
-  background: var(--seat);
-  color: #fff;
+.roster-leader,
+.roster-chip {
+  flex: none;
+  padding: 0 6px;
+  border-radius: 9px;
+  font-size: 11px;
+  line-height: 18px;
+  white-space: nowrap;
 }
-.seat-pick:focus-within {
-  outline: 1px solid var(--vscode-focusBorder);
+.roster-leader {
+  background: var(--vscode-badge-background);
+  color: var(--vscode-badge-foreground);
+}
+.roster-chip {
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.roster-strengths {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.roster-provider {
+  color: var(--muted);
+  white-space: nowrap;
+}
+.roster-lock {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 11px;
+}
+.roster-lock .icon {
+  width: 12px;
+  height: 12px;
+}
+.roster-seat {
+  width: 1%;
+  text-align: end;
+}
+.roster-table th:last-child {
+  text-align: end;
+}
+/* Narrow: each model becomes a two-line row, the switch on the right. */
+@container (max-width: 559px) {
+  .roster-table thead {
+    display: none;
+  }
+  .roster-table tr {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    gap: 2px 12px;
+    padding: 8px 12px;
+  }
+  .roster-table tbody tr + tr {
+    border-top: 1px solid var(--border);
+  }
+  .roster-table td,
+  .roster-table tbody tr + tr td {
+    padding: 0;
+    border: 0;
+  }
+  .roster-model-cell {
+    grid-column: 1;
+  }
+  .roster-seat {
+    grid-column: 2;
+    grid-row: 1 / span 3;
+    align-self: center;
+    width: auto;
+  }
+  .roster-table .roster-provider,
+  .roster-table .roster-strengths-cell {
+    grid-column: 1;
+    padding-inline-start: 30px;
+    font-size: 12px;
+  }
 }
 .table-empty {
   display: flex;

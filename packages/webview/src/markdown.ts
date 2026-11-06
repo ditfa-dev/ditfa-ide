@@ -240,6 +240,18 @@ export function token(value: unknown): string {
   return String(value).replace(/[^\w-]/g, "");
 }
 
+/** 950, 1.2k, 3.40M. */
+export function formatTokens(value: number): string {
+  const count = whole(value);
+  if (count < 1000) {
+    return String(count);
+  }
+  if (count < 1_000_000) {
+    return `${(count / 1000).toFixed(1)}k`;
+  }
+  return `${(count / 1_000_000).toFixed(2)}M`;
+}
+
 /** A whole number for a style or a count, never a string. */
 export function whole(value: unknown, fallback = 0): number {
   const number = Math.round(Number(value));

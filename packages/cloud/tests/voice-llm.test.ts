@@ -152,7 +152,9 @@ describe("streamChat", () => {
       fetch,
     );
     expect(result).toEqual({ text: "Hello", usage: { inputTokens: 7, outputTokens: 2 } });
-    expect(deltas).toEqual(["Hel", "lo"]);
+    // Empty deltas are heartbeats, one per record, so a silent reasoning model is not taken for a stalled one.
+    expect(deltas.filter(Boolean)).toEqual(["Hel", "lo"]);
+    expect(deltas.length).toBeGreaterThan(2);
     const [url, init] = fetch.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe("https://api.example/v1/chat/completions");
     expect(JSON.parse(String(init.body))).toMatchObject({ model: "m", stream: true, response_format: { type: "json_object" } });

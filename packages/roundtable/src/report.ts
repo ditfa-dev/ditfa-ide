@@ -1,4 +1,4 @@
-import type { EndReason, Participant, TableState } from "./types";
+import type { EndReason, Finding, FindingSeverity, Participant, TableMode, TableState } from "./types";
 
 /**
  * The table's record, in the spirit of an Architecture Decision Record. It is
@@ -10,7 +10,10 @@ export function renderReport(state: TableState): string {
   const name = (id: string) => nameFor(state, id);
 
   out.push(`# Round table: ${excerpt(state.motion, 100) || state.id}`, "");
-  out.push(`- **Mode:** ${state.mode === "review" ? "Review (anonymous deliberation)" : "Team (collaborative work)"}`);
+  out.push(`- **Mode:** ${MODE[state.mode]}`);
+  if (state.scope) {
+    out.push(`- **Reviewed:** ${state.scope}`);
+  }
   out.push(`- **Outcome:** ${OUTCOME[state.endedBy ?? "completed"]}${state.endedBy === null ? " (still running)" : ""}`);
   if (state.leaderId) {
     out.push(`- **Leader:** ${name(state.leaderId)}`);
@@ -19,25 +22,40 @@ export function renderReport(state: TableState): string {
     out.push(`- **Critique rounds:** ${state.critiques.reduce((max, critique) => Math.max(max, critique.round), 0)}`);
   }
 
-  out.push("", "## Motion", "", state.motion.trim() || "*No motion.*");
+  if (state.mode === "code") {
+    out.push("", "## Focus", "", state.motion.trim() || "*None: the whole set of changes.*");
+  } else {
+    out.push("", "## Motion", "", state.motion.trim() || "*No motion.*");
+  }
 
   out.push("", "## Participants", "");
   out.push("| | Model | Provider | Source | Status |", "|---|---|---|---|---|");
   for (const entry of state.participants) {
-    const status = entry.status === "failed" ? `failed: ${cell(entry.error ?? "unknown error")}` : "took part";
+    const status =
+      entry.status === "failed"
+        ? `failed: ${cell(entry.error ?? "unknown error")}`
+        : entry.status === "stopped"
+          ? "stopped mid-answer"
+          : "took part";
     out.push(
       `| ${cell(label(state, entry.participant.id))} | ${cell(entry.participant.model.label)} (\`${entry.participant.model.id}\`) | ` +
         `${cell(entry.participant.model.provider)} | ${SOURCE[entry.participant.source]} | ${status} |`,
     );
   }
 
-  out.push("", state.mode === "review" ? "## Final answer" : "## Deliverable", "");
+  out.push("", FINAL_HEADING[state.mode], "");
+  const origin = finalOrigin(state, name);
+  if (origin) {
+    out.push(`*${origin}*`, "");
+  }
   out.push(state.finalAnswer?.trim() || "*No final answer was produced.*");
 
   if (state.mode === "review") {
     renderReview(state, out, name);
-  } else {
+  } else if (state.mode === "team") {
     renderTeam(state, out, name);
+  } else {
+    renderFindings(state, out, name);
   }
 
   if (state.notices.length > 0) {
@@ -142,12 +160,99 @@ function renderTeam(state: TableState, out: string[], name: (id: string) => stri
   }
 }
 
+function renderFindings(state: TableState, out: string[], name: (id: string) => string): void {
+  out.push("", "## Findings", "");
+  if (state.findings.length === 0) {
+    out.push("*No findings.*");
+    return;
+  }
+  out.push(
+    "Agreement: unanimous means every reviewer found or confirmed it; majority, more backed than rejected it; " +
+      "single, one reviewer and nobody else; disputed, rejected at least as often as backed.",
+  );
+  for (const severity of SEVERITY_ORDER) {
+    const findings = state.findings.filter((finding) => finding.severity === severity);
+    if (findings.length === 0) {
+      continue;
+    }
+    out.push("", `### ${SEVERITY_LABEL[severity]}`, "", "| | Where | Finding | Agreement | Raised by |", "|---|---|---|---|---|");
+    for (const finding of findings) {
+      out.push(
+        `| ${finding.id} | \`${cell(finding.file)}:${lines(finding)}\` | ${cell(finding.title)} | ${agreementOf(finding)} | ` +
+          `${cell(finding.raisedBy.map(name).join(", "))} |`,
+      );
+    }
+  }
+  out.push("", "## Details");
+  for (const finding of state.findings) {
+    out.push("", `### ${finding.id}: ${finding.title}`, "");
+    out.push(`- **Where:** \`${finding.file}:${lines(finding)}\``);
+    out.push(`- **Severity:** ${finding.severity} · ${finding.category}`);
+    out.push(`- **Agreement:** ${agreementOf(finding)}`);
+    for (const vote of finding.votes) {
+      out.push(`  - ${name(vote.participantId)}: ${vote.vote}${vote.note ? `, ${excerpt(vote.note, 200)}` : ""}`);
+    }
+    if (finding.why) {
+      out.push("", finding.why);
+    }
+    if (finding.fix) {
+      out.push("", "**Suggested fix:**", "", finding.fix);
+    }
+  }
+}
+
+function lines(finding: Finding): string {
+  return finding.endLine > finding.startLine ? `${finding.startLine}-${finding.endLine}` : String(finding.startLine);
+}
+
+function agreementOf(finding: Finding): string {
+  const confirm = finding.votes.filter((vote) => vote.vote === "confirm").length;
+  const reject = finding.votes.filter((vote) => vote.vote === "reject").length;
+  const counts = [`${finding.raisedBy.length} raised`, confirm ? `${confirm} confirmed` : "", reject ? `${reject} rejected` : ""]
+    .filter(Boolean)
+    .join(", ");
+  return `${finding.agreement} (${counts})`;
+}
+
+/** Says where the final text came from when it is not simply the leader's complete answer. */
+function finalOrigin(state: TableState, name: (id: string) => string): string | null {
+  const by = state.finalBy ? ` by ${name(state.finalBy)}` : "";
+  switch (state.finalState) {
+    case "partial":
+      return `Cut off${by}: the text is incomplete.`;
+    case "fallback":
+      return state.finalBy
+        ? `Stand-in: a proposal as written${by}, because no synthesis was written.`
+        : "Stand-in: put together from the table's work, because the leader could not write it.";
+    case "complete":
+      return state.finalBy ? `Written${by}.` : null;
+    default:
+      return null;
+  }
+}
+
+/** The same words the card uses for each ending. */
 const OUTCOME: Record<EndReason, string> = {
   completed: "Completed",
-  budget: "Stopped by the budget",
-  aborted: "Cancelled",
-  insufficientParticipants: "Stopped: too few participants left",
+  budget: "Stopped: budget reached",
+  aborted: "Stopped by you",
+  insufficientParticipants: "Ended: too few models answered",
 };
+
+const MODE: Record<TableMode, string> = {
+  review: "Review (anonymous deliberation)",
+  team: "Team (collaborative work)",
+  code: "Panel review (multi-model code review)",
+};
+
+const FINAL_HEADING: Record<TableMode, string> = {
+  review: "## Final answer",
+  team: "## Deliverable",
+  code: "## Verdict",
+};
+
+const SEVERITY_ORDER: readonly FindingSeverity[] = ["critical", "high", "medium", "low"];
+const SEVERITY_LABEL: Record<FindingSeverity, string> = { critical: "Critical", high: "High", medium: "Medium", low: "Low" };
 
 const SOURCE: Record<Participant["source"], string> = {
   subscription: "subscription",

@@ -15,7 +15,7 @@ import type { ChatEntry, PlanStep, TokenUsageView } from "@ditfa-ide/contract";
  */
 
 const VERSION = 1;
-/** Command output is the only thing that grows without bound. */
+/** Command output and a round table's calls are what grow without bound. */
 const MAX_OUTPUT_CHARS = 20_000;
 const MAX_FILE_BYTES = 4_000_000;
 const MAX_THREADS = 200;
@@ -45,7 +45,23 @@ export class TranscriptStore {
     }
   }
 
-  async save(transcript: Omit<StoredTranscript, "version">): Promise<void> {
+  /** Writes to one thread's file run one after another, so a late write never undoes an earlier one. */
+  private readonly writes = new Map<string, Promise<void>>();
+
+  private queue(threadId: string, write: () => Promise<void>): Promise<void> {
+    const next = (this.writes.get(threadId) ?? Promise.resolve()).then(write, write);
+    this.writes.set(threadId, next);
+    void next.finally(() => {
+      if (this.writes.get(threadId) === next) this.writes.delete(threadId);
+    });
+    return next;
+  }
+
+  save(transcript: Omit<StoredTranscript, "version">): Promise<void> {
+    return this.queue(transcript.threadId, () => this.write(transcript));
+  }
+
+  private async write(transcript: Omit<StoredTranscript, "version">): Promise<void> {
     try {
       await mkdir(this.directory, { recursive: true });
       const payload = serialize({ ...transcript, version: VERSION });
@@ -54,6 +70,35 @@ export class TranscriptStore {
     } catch (error) {
       this.logger.warn(`could not save transcript: ${error instanceof Error ? error.message : error}`);
     }
+  }
+
+  /**
+   * Adds or replaces one row in a thread that is not open, such as a round table that finished after the user
+   * moved to another conversation.
+   */
+  upsertEntry(threadId: string, entry: ChatEntry): Promise<void> {
+    return this.queue(threadId, async () => {
+      const stored = await this.load(threadId);
+      // A file that is there but cannot be read must not be replaced by a one-row transcript.
+      if (!stored && (await stat(this.fileFor(threadId)).then(() => true, () => false))) {
+        this.logger.warn(`could not add a row to the unreadable transcript of ${threadId}`);
+        return;
+      }
+      const entries = stored?.entries ?? [];
+      const index = entries.findIndex((candidate) => candidate.id === entry.id);
+      if (index >= 0) {
+        entries[index] = entry;
+      } else {
+        entries.push(entry);
+      }
+      await this.write({
+        threadId,
+        entries,
+        plan: stored?.plan ?? [],
+        planExplanation: stored?.planExplanation ?? null,
+        tokenUsage: stored?.tokenUsage ?? null,
+      });
+    });
   }
 
   async remove(threadId: string): Promise<void> {
@@ -86,7 +131,16 @@ function serialize(transcript: StoredTranscript): string {
   const trimmed = transcript.entries.map((entry) =>
     entry.kind === "command" && entry.output.length > MAX_OUTPUT_CHARS
       ? { ...entry, output: entry.output.slice(-MAX_OUTPUT_CHARS) }
-      : entry,
+      : entry.kind === "roundtable"
+        ? {
+            ...entry,
+            lanes: entry.lanes.map((lane) => ({
+              ...lane,
+              text: (lane.text ?? "").slice(0, MAX_OUTPUT_CHARS),
+              messages: (lane.messages ?? []).map((message) => ({ ...message, text: message.text.slice(0, MAX_OUTPUT_CHARS) })),
+            })),
+          }
+        : entry,
   );
   let payload = JSON.stringify({ ...transcript, entries: trimmed });
   // Last resort for a pathological thread: keep the newest half until it fits.
@@ -105,8 +159,13 @@ function serialize(transcript: StoredTranscript): string {
  */
 export function mergeTranscript(turns: Turn[], stored: ChatEntry[] | null): ChatEntry[] {
   const storedByTurn = new Map<string, ChatEntry[]>();
+  // Rows the extension made itself (round tables) belong to no turn; they go back where they were, by time.
+  const hostRows: ChatEntry[] = [];
   for (const entry of stored ?? []) {
     if (!entry.turnId) {
+      if (entry.kind === "roundtable") {
+        hostRows.push(settleRoundTable(entry));
+      }
       continue;
     }
     const bucket = storedByTurn.get(entry.turnId);
@@ -132,5 +191,74 @@ export function mergeTranscript(turns: Turn[], stored: ChatEntry[] | null): Chat
       }
     }
   }
-  return merged;
+  if (hostRows.length === 0) {
+    return merged;
+  }
+  // Each host row goes after the last row that started before it.
+  const result = [...merged];
+  for (const row of [...hostRows].sort((a, b) => a.at - b.at)) {
+    let index = result.length;
+    while (index > 0 && (result[index - 1]?.at ?? 0) > row.at) {
+      index -= 1;
+    }
+    result.splice(index, 0, row);
+  }
+  return result;
+}
+
+/** A table saved while it ran was cut off by a reload or a crash: it must not come back with a live Stop button. */
+function settleRoundTable(saved: Extract<ChatEntry, { kind: "roundtable" }>): ChatEntry {
+  const entry = withRoundTableDefaults(saved);
+  if (entry.status !== "running" && entry.status !== "stopping") {
+    return entry;
+  }
+  return {
+    ...entry,
+    status: "stopped",
+    phase: "Interrupted",
+    endedBy: "aborted",
+    endedAt: entry.endedAt ?? entry.at,
+    finalState: entry.final.trim() ? "partial" : "none",
+    phases: entry.phases.map((step) => (step.state === "active" ? { ...step, state: "pending" } : step)),
+    lanes: entry.lanes.map((lane) =>
+      lane.status === "thinking"
+        ? {
+            ...lane,
+            status: "stopped",
+            messages: lane.messages.map((message) =>
+              message.status === "streaming" ? { ...message, status: "stopped" } : message,
+            ),
+          }
+        : lane,
+    ),
+    notices: [...entry.notices, "The window was reloaded while the team was working, so it stopped here."],
+  };
+}
+
+/** Tables saved by 0.6.0 predate the team view's fields; fill them so an old card still renders. */
+function withRoundTableDefaults(
+  entry: Extract<ChatEntry, { kind: "roundtable" }>,
+): Extract<ChatEntry, { kind: "roundtable" }> {
+  const partial = entry as Partial<typeof entry> & typeof entry;
+  return {
+    ...entry,
+    phases: partial.phases ?? [],
+    lanes: (partial.lanes ?? []).map((lane) => ({
+      ...lane,
+      letter: lane.letter ?? null,
+      ref: lane.ref ?? `${lane.provider}:${lane.model}`,
+      messages: lane.messages ?? [],
+    })),
+    subtasks: partial.subtasks ?? [],
+    rankings: partial.rankings ?? [],
+    final: partial.final ?? "",
+    finalState: partial.finalState ?? (partial.final ? "complete" : "none"),
+    finalBy: partial.finalBy ?? null,
+    scope: partial.scope ?? null,
+    findings: partial.findings ?? [],
+    notices: partial.notices ?? [],
+    error: partial.error ?? null,
+    startedAt: partial.startedAt ?? entry.at,
+    endedAt: partial.endedAt ?? null,
+  };
 }

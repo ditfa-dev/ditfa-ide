@@ -65,6 +65,10 @@ export class FakeSettingsSource implements SettingsDataSource, vscode.Disposable
     await this.pause();
     this.failIf(key);
     this.state = withSetting(this.state, key, value as SettingValue<SettingKey>);
+    if (key === "mcp.terminalAccess") {
+      const terminalBridge = value === "off" ? "off" : this.state.account.signedIn ? "connected" : "signedOut";
+      this.state = { ...this.state, mcp: { ...this.state.mcp, terminalBridge } };
+    }
     this.emitter.fire();
   }
 
@@ -101,7 +105,11 @@ function applyAction(state: SettingsSnapshot, action: SettingsSourceAction, now:
         usage: account.usage,
         upgrade: account.upgrade,
         models: [...SUBSCRIPTION_MODELS, ...state.models.filter((model) => model.source !== "subscription")],
-        mcp: { ...state.mcp, ditfaTools: account.mcp.ditfaTools },
+        mcp: {
+          ...state.mcp,
+          ditfaTools: account.mcp.ditfaTools,
+          terminalBridge: state.mcp.terminalAccess === "off" ? "off" : "connected",
+        },
       };
     }
     case "signOut": {
@@ -118,7 +126,11 @@ function applyAction(state: SettingsSnapshot, action: SettingsSourceAction, now:
         upgrade: null,
         models: state.models.filter((model) => model.source !== "subscription"),
         features,
-        mcp: { ...state.mcp, ditfaTools: { connected: false } },
+        mcp: {
+          ...state.mcp,
+          ditfaTools: { connected: false },
+          terminalBridge: state.mcp.terminalAccess === "off" ? "off" : "signedOut",
+        },
       };
     }
     case "useApiKey":
@@ -372,6 +384,8 @@ export function sampleSettings(now: number): SettingsSnapshot {
         { name: "linear", transport: "http", target: "https://mcp.linear.app/mcp", enabled: false, status: "disabled" },
       ],
       ditfaTools: { connected: true, endpoint: "https://api.ditfa.com/mcp" },
+      terminalAccess: "ask",
+      terminalBridge: "connected",
     },
     skills: [
       {
@@ -410,6 +424,6 @@ function signedOutSample(): SettingsSnapshot {
       voiceMode: DEFAULT_MODEL,
     },
     roundtable: { ...signedIn.roundtable, participants: ["deepseek-chat", "llama3.1:8b"] },
-    mcp: { ...signedIn.mcp, ditfaTools: { connected: false } },
+    mcp: { ...signedIn.mcp, ditfaTools: { connected: false }, terminalAccess: "off", terminalBridge: "off" },
   };
 }

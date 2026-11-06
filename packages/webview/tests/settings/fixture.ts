@@ -92,6 +92,8 @@ export function snapshot(overrides: Partial<SettingsSnapshot> = {}): SettingsSna
     mcp: {
       servers: [{ name: "github", transport: "stdio", target: "npx server-github", enabled: true, status: "connected", tools: 4 }],
       ditfaTools: { connected: true },
+      terminalAccess: "ask",
+      terminalBridge: "connected",
     },
     skills: [{ name: "release-notes", description: "Drafts release notes.", path: "~/.ditfa/skills/release-notes/SKILL.md" }],
     rules: { projectRulesPath: "/repo/AGENTS.md", exists: false },
